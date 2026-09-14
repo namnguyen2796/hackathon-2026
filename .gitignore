@@ -1,0 +1,6 @@
+node_modules
+.env
+
+# Keep docs directories, but exclude their generated/source content.
+**/docs/**
+!**/docs/.gitkeep

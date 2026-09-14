@@ -1,0 +1,20 @@
+{
+  "name": "doc-hierarchy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "create-index": "tsx src/createIndex.ts",
+    "ingest": "tsx src/ingest.ts",
+    "mcp": "tsx src/mcpServer.ts"
+  },
+  "dependencies": {
+    "@azure/search-documents": "^13.0.0",
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "diff": "^8.0.2",
+    "dotenv": "^17.4.2",
+    "mammoth": "^1.11.0",
+    "zod": "^4.5.4"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "hackathon",
+  "version": "1.0.0",
+  "private": true,
+  "license": "ISC",
+  "type": "module",
+  "workspaces": [
+    "rag-api",
+    "docs-search",
+    "doc-hierarchy"
+  ],
+  "scripts": {
+    "rag-api": "npm run start -w rag-api",
+    "docs-search:create-index": "npm run create-index -w docs-search",
+    "docs-search:ingest": "npm run ingest -w docs-search",
+    "doc-hierarchy:create-index": "npm run create-index -w doc-hierarchy",
+    "doc-hierarchy:ingest": "npm run ingest -w doc-hierarchy"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

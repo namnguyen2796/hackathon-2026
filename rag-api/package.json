@@ -1,0 +1,18 @@
+{
+  "name": "rag-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/ragApi.ts"
+  },
+  "dependencies": {
+    "@azure/search-documents": "^13.0.0",
+    "@huggingface/transformers": "^4.2.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6"
+  }
+}
