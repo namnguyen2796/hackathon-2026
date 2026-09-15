@@ -1,0 +1,14 @@
+{
+  "name": "mcp-manager",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "mcp": "tsx src/mcpServer.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "tree-kill": "^1.2.2",
+    "zod": "^4.5.4"
+  }
+}
