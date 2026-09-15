@@ -5,6 +5,7 @@ import xpath from "xpath";
 
 const W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const select = xpath.useNamespaces({ w: W_NS });
+const APPROVED_BASELINE_STATUS = /^Approved \(Baseline (\d+)\)$/;
 
 function xmlEscape(text: string): string {
   return text
@@ -41,6 +42,76 @@ function parseFragment(xml: string): Node {
   return new DOMParser().parseFromString(xml, "text/xml").documentElement!;
 }
 
+function replaceCellTextAsTrackedChange(
+  doc: Document,
+  cell: Node,
+  newText: string,
+  author: string,
+  date: string
+): void {
+  const oldText = (select(".//w:t", cell) as Node[]).map(n => n.textContent ?? "").join("");
+  (select(".//w:r", cell) as Node[]).forEach(r => r.parentNode?.removeChild(r));
+  const paragraph = (select(".//w:p", cell) as Node[])[0];
+  const delId = nextRevisionId(doc);
+  const delNode = parseFragment(
+    `<w:del xmlns:w="${W_NS}" w:id="${delId}" w:author="${xmlEscape(author)}" w:date="${date}">` +
+    `<w:r><w:delText xml:space="preserve">${xmlEscape(oldText)}</w:delText></w:r></w:del>`
+  );
+  const insNode = parseFragment(
+    `<w:ins xmlns:w="${W_NS}" w:id="${delId + 1}" w:author="${xmlEscape(author)}" w:date="${date}">` +
+    `<w:r><w:t xml:space="preserve">${xmlEscape(newText)}</w:t></w:r></w:ins>`
+  );
+  paragraph.appendChild(doc.importNode(delNode, true));
+  paragraph.appendChild(doc.importNode(insNode, true));
+}
+
+function updateStatusIfApproved(
+  doc: Document,
+  latestBaselineName: string,
+  author: string,
+  date: string
+): boolean {
+  const latestNumber = latestBaselineName.match(/-(\d+)$/)?.[1];
+  if (!latestNumber) return false;
+
+  const rows = select("//w:tbl/w:tr", doc) as Node[];
+  for (const row of rows) {
+    const cells = select("./w:tc", row) as Node[];
+    if (cells.length < 2) continue;
+
+    const label = (select(".//w:t", cells[0]) as Node[])
+      .map(n => n.textContent ?? "")
+      .join("")
+      .trim();
+    if (label !== "Status") continue;
+
+    const value = (select(".//w:t", cells[1]) as Node[])
+      .map(n => n.textContent ?? "")
+      .join("")
+      .trim();
+    const match = value.match(APPROVED_BASELINE_STATUS);
+    if (match && match[1] === latestNumber) {
+      replaceCellTextAsTrackedChange(doc, cells[1], "Draft", author, date);
+      for (const signoffRow of rows) {
+        const signoffCells = select("./w:tc", signoffRow) as Node[];
+        if (signoffCells.length < 2) continue;
+
+        const signoffLabel = (select(".//w:t", signoffCells[0]) as Node[])
+          .map(n => n.textContent ?? "")
+          .join("")
+          .trim();
+        if (signoffLabel === "Signoff Date") {
+          replaceCellTextAsTrackedChange(doc, signoffCells[1], "TBD", author, date);
+          break;
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
 /**
  * Replace the paragraph whose current text is exactly `oldText` with `newText`,
  * as a native Word tracked change. If `oldText` matches a paragraph this function
@@ -52,8 +123,9 @@ export async function applyChange(
   filePath: string,
   oldText: string,
   newText: string,
-  author: string
-): Promise<void> {
+  author: string,
+  latestBaselineName: string
+): Promise<{ statusChanged: boolean }> {
   const zip = await JSZip.loadAsync(fs.readFileSync(filePath));
   const docXmlPath = "word/document.xml";
   const xml = await zip.file(docXmlPath)!.async("string");
@@ -126,7 +198,10 @@ export async function applyChange(
     original.parentNode!.insertBefore(doc.importNode(insPara, true), original.nextSibling);
   }
 
+  const statusChanged = updateStatusIfApproved(doc, latestBaselineName, author, date);
+
   const updatedXml = new XMLSerializer().serializeToString(doc);
   zip.file(docXmlPath, updatedXml);
   fs.writeFileSync(filePath, await zip.generateAsync({ type: "nodebuffer" }));
+  return { statusChanged };
 }

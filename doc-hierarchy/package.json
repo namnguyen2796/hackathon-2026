@@ -6,7 +6,8 @@
   "scripts": {
     "create-index": "tsx src/createIndex.ts",
     "ingest": "tsx src/ingest.ts",
-    "mcp": "tsx src/mcpServer.ts"
+    "mcp": "tsx src/mcpServer.ts",
+    "test": "tsx --test src/*.test.ts"
   },
   "dependencies": {
     "@azure/search-documents": "^13.0.0",

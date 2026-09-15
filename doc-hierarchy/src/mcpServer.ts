@@ -173,8 +173,10 @@ server.registerTool(
     try {
       const filePath = draftFilePath(docId);
       const { owner } = await readDocMetadata(filePath);
-      await applyChange(filePath, oldText, newText, owner);
-      return { content: [{ type: "text" as const, text: `Proposed change to ${docId}, tracked as an edit by ${owner}.` }] };
+      const latestBaseline = path.basename(getLatestBaselineDir());
+      const { statusChanged } = await applyChange(filePath, oldText, newText, owner, latestBaseline);
+      const note = statusChanged ? " Proposed tracked changes set Status to Draft and Signoff Date to TBD." : "";
+      return { content: [{ type: "text" as const, text: `Proposed change to ${docId}, tracked as an edit by ${owner}.${note}` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
     }
