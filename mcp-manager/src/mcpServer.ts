@@ -58,7 +58,7 @@ async function main(): Promise<void> {
 
   const server = new Server(
     { name: "mcp-manager", version: "1.0.0" },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: { listChanged: true } } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -83,6 +83,7 @@ async function main(): Promise<void> {
         }
         await restartServer(target, config);
         await refreshProxiedTools([target]);
+        await server.sendToolListChanged();
         return text(JSON.stringify(getServerInfo(target), null, 2));
       }
 
