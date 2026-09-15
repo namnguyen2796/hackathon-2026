@@ -7,14 +7,16 @@
   "workspaces": [
     "rag-api",
     "docs-search",
-    "doc-hierarchy"
+    "doc-hierarchy",
+    "mcp-manager"
   ],
   "scripts": {
     "rag-api": "npm run start -w rag-api",
     "docs-search:create-index": "npm run create-index -w docs-search",
     "docs-search:ingest": "npm run ingest -w docs-search",
     "doc-hierarchy:create-index": "npm run create-index -w doc-hierarchy",
-    "doc-hierarchy:ingest": "npm run ingest -w doc-hierarchy"
+    "doc-hierarchy:ingest": "npm run ingest -w doc-hierarchy",
+    "mcp-manager": "npm run mcp -w mcp-manager"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
