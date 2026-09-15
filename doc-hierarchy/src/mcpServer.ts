@@ -15,11 +15,11 @@ const INDEX = "doc-hierarchy-index";
 const NOTIFY_DIR = process.env.NOTIFY_LOG_DIR ?? path.join(packageRoot, "..", "..", "logs");
 const NOTIFY_FILE = path.join(NOTIFY_DIR, "doc-hierarchy-notifications.json");
 
-type Notification = { timestamp: string; docId: string; message: string };
+type Notification = { timestamp: string; docId: string; notifierName: string; message: string };
 
 /** Append one entry. Read and write are both sync with no await between them, so
  *  concurrent tool calls cannot interleave and lose each other's writes. */
-function appendNotification(docId: string, message: string): number {
+function appendNotification(docId: string, notifierName: string, message: string): number {
   fs.mkdirSync(NOTIFY_DIR, { recursive: true });
 
   let entries: Notification[] = [];
@@ -31,7 +31,7 @@ function appendNotification(docId: string, message: string): number {
     entries = parsed;
   }
 
-  entries.push({ timestamp: new Date().toISOString(), docId, message });
+  entries.push({ timestamp: new Date().toISOString(), docId, notifierName, message });
   fs.writeFileSync(NOTIFY_FILE, JSON.stringify(entries, null, 2));
   return entries.length;
 }
@@ -144,13 +144,13 @@ server.registerTool(
     description:
       "Record a notification to a document's owner/reviewer. Appends to " +
       "logs/doc-hierarchy-notifications.json (stub — wire up email/Teams later).",
-    inputSchema: { docId: z.string(), message: z.string() },
+    inputSchema: { docId: z.string(), notifierName: z.string(), message: z.string() },
   },
-  async ({ docId, message }) => {
+  async ({ docId, notifierName, message }) => {
     try {
-      const count = appendNotification(docId, message);
+      const count = appendNotification(docId, notifierName, message);
       // stderr, not stdout — stdout carries the JSON-RPC stream.
-      console.error(`NOTIFY ${docId}: ${message}`);
+      console.error(`NOTIFY ${docId} by ${notifierName}: ${message}`);
       return { content: [{ type: "text" as const, text: `Logged to ${NOTIFY_FILE} (${count} total).` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
