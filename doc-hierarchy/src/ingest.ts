@@ -7,7 +7,7 @@ import path from "node:path";
 import mammoth from "mammoth";
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 import { SearchClient, AzureKeyCredential } from "@azure/search-documents";
-import { getCurrentBaselineDir, packageRoot } from "./currentBaseline.js";
+import { getLatestBaselineDir, packageRoot } from "./baselines.js";
 
 // Mirrors the doc-hierarchy-index schema in createIndex.ts.
 type HierarchyDoc = {
@@ -19,6 +19,15 @@ type HierarchyDoc = {
   reviewer: string;
   dependsOn: string[];
   embedding: number[];
+};
+
+type ParsedDoc = {
+  filePath: string;
+  text: string;
+  docId: string;
+  owner: string;
+  reviewer: string;
+  dependsOn: string[];
 };
 
 const client = new SearchClient<HierarchyDoc>(
@@ -42,9 +51,13 @@ function parseMetadata(html: string) {
     [...m[1].matchAll(/<td[^>]*>(.*?)<\/td>/gs)].map(c => c[1].replace(/<[^>]+>/g, "").trim())
   );
   const map = Object.fromEntries(rows.map(([k, v]) => [k, v]));
-  const required = ["Document ID", "Owner", "Reviewer", "Depends On"];
-  const missing = required.filter((k) => map[k] === undefined);
-  if (missing.length) throw new Error(`Metadata table missing: ${missing.join(", ")}`);
+
+  const required = ["Document ID", "Owner", "Reviewer", "Depends On"] as const;
+  const missing = required.filter(f => map[f] === undefined);
+  if (missing.length) {
+    throw new Error(`Metadata table missing field(s): ${missing.join(", ")}`);
+  }
+
   return {
     docId: map["Document ID"],
     owner: map["Owner"],
@@ -59,40 +72,75 @@ function chunk(text: string, size = 1000): string[] {
   return out;
 }
 
-async function ingestFile(filePath: string) {
+async function parseFile(filePath: string): Promise<ParsedDoc> {
   const { value: html } = await mammoth.convertToHtml({ path: filePath });
   const { value: text } = await mammoth.extractRawText({ path: filePath });
   const meta = parseMetadata(html);
+  return { filePath, text, ...meta };
+}
 
-  // Deterministic per-doc IDs + delete-before-upload: re-ingesting the same
-  // docId (a new baseline, a re-run) replaces its chunks cleanly instead of
-  // accumulating duplicates or leaving orphaned chunks when content shrinks.
-  const stale = await client.search("*", {
-    filter: `docId eq '${meta.docId.replace(/'/g, "''")}'`,
-    select: ["id"],
-  });
-  const staleIds: string[] = [];
-  for await (const r of stale.results) staleIds.push(r.document.id);
-  if (staleIds.length) await client.deleteDocuments("id", staleIds);
+function assertNoCycle(manifest: { docId: string; dependsOn: string[] }[]) {
+  const dependsOnById = new Map(manifest.map(m => [m.docId, m.dependsOn]));
+  const state = new Map<string, "visiting" | "done">();
 
-  const chunks = chunk(text);
+  function visit(id: string, chain: string[]) {
+    if (state.get(id) === "done") return;
+    if (state.get(id) === "visiting") {
+      throw new Error(`Dependency cycle: ${[...chain, id].join(" -> ")}`);
+    }
+    state.set(id, "visiting");
+    for (const dep of dependsOnById.get(id) ?? []) visit(dep, [...chain, id]);
+    state.set(id, "done");
+  }
+
+  for (const { docId } of manifest) visit(docId, []);
+}
+
+// Wipes every document currently in the index — not the Azure Search index resource itself,
+// just its contents. Since the index only ever represents one baseline at a time, this is
+// sufficient to guarantee no stale entry from a previous run (or a previous ID scheme) survives.
+async function wipeIndex() {
+  let ids: string[];
+  try {
+    const all = await client.search("*", { select: ["id"] });
+    ids = [];
+    for await (const r of all.results) ids.push(r.document.id);
+  } catch (err) {
+    throw new Error(
+      `Could not read doc-hierarchy-index — has createIndex.ts been run yet? (${(err as Error).message})`
+    );
+  }
+  if (ids.length) await client.deleteDocuments("id", ids);
+  console.log(`Wiped ${ids.length} existing chunk(s) from the index before reindexing.`);
+}
+
+async function uploadDoc(doc: ParsedDoc) {
+  const chunks = chunk(doc.text);
   const documents = await Promise.all(chunks.map(async (c, i) => ({
-    id: `${meta.docId}-${i}`,
-    docId: meta.docId,
+    id: `${doc.docId}-${i}`,
+    docId: doc.docId,
     content: c,
-    source: path.relative(packageRoot, filePath).replaceAll("\\", "/"),
-    owner: meta.owner,
-    reviewer: meta.reviewer,
-    dependsOn: meta.dependsOn,
+    source: path.relative(packageRoot, doc.filePath).split(path.sep).join("/"),
+    owner: doc.owner,
+    reviewer: doc.reviewer,
+    dependsOn: doc.dependsOn,
     embedding: await embed(c),
   })));
   await client.uploadDocuments(documents);
-  console.log(`Indexed ${documents.length} chunks from ${meta.docId}`);
+  console.log(`Indexed ${documents.length} chunks from ${doc.docId}`);
 }
 
-const baselineDir = process.argv[2]
-  ? path.resolve(packageRoot, process.argv[2])
-  : getCurrentBaselineDir();
-for (const f of fs.readdirSync(baselineDir).filter(f => f.endsWith(".docx"))) {
-  await ingestFile(path.join(baselineDir, f));
-}
+const baselineDir = getLatestBaselineDir();
+const files = fs.readdirSync(baselineDir).filter(f => f.endsWith(".docx"));
+
+// Parse and validate every document before touching the index — a malformed doc found
+// partway through must not leave the index wiped but only half-repopulated.
+const parsed = await Promise.all(files.map(f => parseFile(path.join(baselineDir, f))));
+const manifest = parsed.map(d => ({ docId: d.docId, dependsOn: d.dependsOn }));
+assertNoCycle(manifest);
+
+await wipeIndex();
+for (const doc of parsed) await uploadDoc(doc);
+
+fs.writeFileSync(path.join(baselineDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+console.log(`Wrote manifest.json (${manifest.length} docs) to ${baselineDir}`);

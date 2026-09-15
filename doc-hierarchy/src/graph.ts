@@ -1,11 +1,11 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { getCurrentBaselineDir } from "./currentBaseline.js";
+import { getLatestBaselineDir } from "./baselines.js";
 
 export type Edge = { docId: string; dependsOn: string[] };
 
 export async function loadGraph(): Promise<Edge[]> {
-  const file = path.join(getCurrentBaselineDir(), "manifest.json");
+  const file = path.join(getLatestBaselineDir(), "manifest.json");
   return JSON.parse(await readFile(file, "utf-8"));
 }
 

@@ -5,11 +5,10 @@ import path from "node:path";
 import { z } from "zod";
 import { loadGraph, downstreamOf } from "./graph.js";
 import { detectChange } from "./detectChange.js";
-import { packageRoot, getCurrentBaselineDir } from "./currentBaseline.js";
+import { resolveDocPath, getLatestBaselineDir, getLatestDraftDir, packageRoot } from "./baselines.js";
 
 const RAG_API_URL = process.env.RAG_API_URL ?? "http://localhost:8000/search";
 const INDEX = "doc-hierarchy-index";
-const DOCS_ROOT = path.join(packageRoot, "docs");
 
 // Deliberately outside the repo, so notifications survive branch switches and
 // aren't caught by .gitignore rules on the project tree.
@@ -37,14 +36,8 @@ function appendNotification(docId: string, message: string): number {
   return entries.length;
 }
 
-// The server's cwd is whatever launched it, and these paths come from a model,
-// so resolve against the package and refuse anything that escapes docs/.
-function resolveDocPath(input: string): string {
-  const resolved = path.resolve(packageRoot, input);
-  if (!resolved.startsWith(DOCS_ROOT + path.sep)) {
-    throw new Error(`Path must be inside docs/, got: ${input}`);
-  }
-  return resolved;
+function odataEscape(s: string): string {
+  return s.replace(/'/g, "''");
 }
 
 const server = new McpServer({ name: "doc-hierarchy", version: "1.0.0" });
@@ -53,28 +46,28 @@ server.registerTool(
   "list_documents",
   {
     description:
-      "List the documents in the set, which differ from the baseline, and the baseline/draft " +
-      "file paths that detect_change needs. Call this first if you don't know what exists.",
-    inputSchema: { draftDir: z.string().default("docs/draft2") },
+      "List every document in the current baseline's graph and whether it changed in a draft. " +
+      "Defaults to the latest baseline and latest draft folders; call this first if you don't " +
+      "know what exists.",
+    inputSchema: { draftDir: z.string().optional() },
   },
   async ({ draftDir }) => {
     try {
-      const baselineDir = getCurrentBaselineDir();
-      const draft = resolveDocPath(draftDir);
-      const rel = (p: string) => path.relative(packageRoot, p).replaceAll("\\", "/");
+      const baselineDir = getLatestBaselineDir();
+      const resolvedDraftDir = draftDir ? resolveDocPath(draftDir) : getLatestDraftDir();
 
       const lines = (await loadGraph()).map(({ docId }) => {
         // Documents are stored as <docId>.docx; a mismatch shows up as "missing".
         const b = path.join(baselineDir, `${docId}.docx`);
-        const d = path.join(draft, `${docId}.docx`);
+        const d = path.join(resolvedDraftDir, `${docId}.docx`);
         const state = !fs.existsSync(b) || !fs.existsSync(d)
           ? "missing"
           : fs.readFileSync(b).equals(fs.readFileSync(d)) ? "same   " : "CHANGED";
-        return `  ${docId.padEnd(13)} ${state}  baseline: ${rel(b)}  draft: ${rel(d)}`;
+        return `  ${docId.padEnd(13)} ${state}`;
       });
 
       return { content: [{ type: "text" as const, text:
-        `Current baseline: ${path.basename(baselineDir)}\n\n${lines.join("\n")}` }] };
+        `Current baseline: ${path.basename(baselineDir)}\nDraft: ${path.basename(resolvedDraftDir)}\n\n${lines.join("\n")}` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
     }
@@ -85,12 +78,22 @@ server.registerTool(
   "detect_change",
   {
     description:
-      "Diff a document's baseline copy against its draft copy. Paths are relative to the " +
-      "doc-hierarchy package and must be inside docs/, e.g. 'docs/baseline1/SYS-REQ-001.docx'.",
-    inputSchema: { docId: z.string(), baselinePath: z.string(), draftPath: z.string() },
+      "Diff a document's baseline copy against its draft copy. Give baselinePath/draftPath to " +
+      "override; otherwise resolves docId against the latest baseline and latest draft folders.",
+    inputSchema: {
+      docId: z.string(),
+      baselinePath: z.string().optional(),
+      draftPath: z.string().optional(),
+    },
   },
-  async ({ baselinePath, draftPath }) => {
-    const summary = await detectChange(resolveDocPath(baselinePath), resolveDocPath(draftPath));
+  async ({ docId, baselinePath, draftPath }) => {
+    const resolvedBaselinePath = baselinePath
+      ? resolveDocPath(baselinePath)
+      : path.join(getLatestBaselineDir(), `${docId}.docx`);
+    const resolvedDraftPath = draftPath
+      ? resolveDocPath(draftPath)
+      : path.join(getLatestDraftDir(), `${docId}.docx`);
+    const summary = await detectChange(resolvedBaselinePath, resolvedDraftPath);
     return { content: [{ type: "text" as const, text: summary ?? "No changes detected." }] };
   }
 );
@@ -98,7 +101,7 @@ server.registerTool(
 server.registerTool(
   "trace_impact",
   {
-    description: "Given a changed document ID, return all documents downstream of it.",
+    description: "Given a changed document ID, return all documents downstream of it in the latest baseline.",
     inputSchema: { docId: z.string() },
   },
   async ({ docId }) => {
@@ -123,7 +126,7 @@ server.registerTool(
         index: INDEX,
         query: changeSummary,
         top_k: 5,
-        filter: `docId eq '${docId.replace(/'/g, "''")}'`,
+        filter: `docId eq '${odataEscape(docId)}'`,
       }),
     });
     const { results } = (await res.json()) as { results: { content: string; source: string }[] };
