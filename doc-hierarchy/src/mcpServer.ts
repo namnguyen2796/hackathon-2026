@@ -5,7 +5,9 @@ import path from "node:path";
 import { z } from "zod";
 import { loadGraph, downstreamOf } from "./graph.js";
 import { detectChange } from "./detectChange.js";
-import { resolveDocPath, getLatestBaselineDir, getLatestDraftDir, packageRoot } from "./baselines.js";
+import { resolveDocPath, getLatestBaselineDir, getLatestDraftDir, draftFilePath, packageRoot } from "./baselines.js";
+import { readDocMetadata } from "./metadata.js";
+import { applyChange } from "./applyChange.js";
 
 const RAG_API_URL = process.env.RAG_API_URL ?? "http://localhost:8000/search";
 const INDEX = "doc-hierarchy-index";
@@ -152,6 +154,27 @@ server.registerTool(
       // stderr, not stdout — stdout carries the JSON-RPC stream.
       console.error(`NOTIFY ${docId}: ${message}`);
       return { content: [{ type: "text" as const, text: `Logged to ${NOTIFY_FILE} (${count} total).` }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
+  "apply_change",
+  {
+    description:
+      "Propose a tracked-change edit to a paragraph in the current draft, authored as the " +
+      "document's owner. Reviewable natively in Word — doesn't touch accepted text until " +
+      "someone reviews the revision.",
+    inputSchema: { docId: z.string(), oldText: z.string(), newText: z.string() },
+  },
+  async ({ docId, oldText, newText }) => {
+    try {
+      const filePath = draftFilePath(docId);
+      const { owner } = await readDocMetadata(filePath);
+      await applyChange(filePath, oldText, newText, owner);
+      return { content: [{ type: "text" as const, text: `Proposed change to ${docId}, tracked as an edit by ${owner}.` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
     }

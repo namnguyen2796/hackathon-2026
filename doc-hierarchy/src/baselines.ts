@@ -34,6 +34,11 @@ export function getLatestDraftDir(): string {
   return latestNumberedDir("draft");
 }
 
+/** The only path apply_change is allowed to write to. Baselines stay frozen. */
+export function draftFilePath(docId: string): string {
+  return path.join(getLatestDraftDir(), `${docId}.docx`);
+}
+
 /**
  * Resolve a caller-supplied path against the package root, and refuse anything that
  * resolves outside docs/. These paths come from whatever the calling model supplies via

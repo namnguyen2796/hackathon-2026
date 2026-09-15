@@ -8,6 +8,7 @@ import mammoth from "mammoth";
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 import { SearchClient, AzureKeyCredential } from "@azure/search-documents";
 import { getLatestBaselineDir, packageRoot } from "./baselines.js";
+import { parseMetadata } from "./metadata.js";
 
 // Mirrors the doc-hierarchy-index schema in createIndex.ts.
 type HierarchyDoc = {
@@ -42,28 +43,6 @@ async function embed(text: string): Promise<number[]> {
   extractorPromise ??= pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
   const extractor = await extractorPromise;
   return Array.from((await extractor(text, { pooling: "mean", normalize: true })).data as Float32Array);
-}
-
-// Every doc starts with a Field | Value table: Document ID, Title, Owner,
-// Reviewer, Depends On, Signoff Date, Status.
-function parseMetadata(html: string) {
-  const rows = [...html.matchAll(/<tr>(.*?)<\/tr>/gs)].map(m =>
-    [...m[1].matchAll(/<td[^>]*>(.*?)<\/td>/gs)].map(c => c[1].replace(/<[^>]+>/g, "").trim())
-  );
-  const map = Object.fromEntries(rows.map(([k, v]) => [k, v]));
-
-  const required = ["Document ID", "Owner", "Reviewer", "Depends On"] as const;
-  const missing = required.filter(f => map[f] === undefined);
-  if (missing.length) {
-    throw new Error(`Metadata table missing field(s): ${missing.join(", ")}`);
-  }
-
-  return {
-    docId: map["Document ID"],
-    owner: map["Owner"],
-    reviewer: map["Reviewer"],
-    dependsOn: map["Depends On"] === "—" ? [] : map["Depends On"].split(",").map(s => s.trim()),
-  };
 }
 
 function chunk(text: string, size = 1000): string[] {

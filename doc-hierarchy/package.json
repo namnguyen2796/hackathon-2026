@@ -12,9 +12,12 @@
     "@azure/search-documents": "^13.0.0",
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@xmldom/xmldom": "^0.8.15",
     "diff": "^8.0.2",
     "dotenv": "^17.4.2",
+    "jszip": "^3.10.1",
     "mammoth": "^1.11.0",
+    "xpath": "^0.0.34",
     "zod": "^4.5.4"
   }
 }
