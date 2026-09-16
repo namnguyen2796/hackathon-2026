@@ -1,16 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { packageRoot } from "./baselines.js";
+import { logspaceRoot } from "./config.js";
 
 export type Approval = { name: string; at: string };
 export type DocSignoffState = { owner?: Approval; reviewer?: Approval };
 type Store = Record<string, Record<string, DocSignoffState>>; // draftName -> docId -> state
 
-// Same home as notify_owner's log: outside the repo tree, so approval records survive
-// the gitignored, ephemeral docs/ folder. Resolved per call so tests can redirect it.
 function storePath(): string {
-  const dir = process.env.SIGNOFF_LOG_DIR ?? path.join(packageRoot, "..", "..", "logs");
-  return path.join(dir, "doc-hierarchy-signoffs.json");
+  return path.join(logspaceRoot(), "doc-hierarchy-signoffs.json");
 }
 
 function readStore(): Store {

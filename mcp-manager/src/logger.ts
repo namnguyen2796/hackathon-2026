@@ -2,8 +2,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { packageRoot } from "./config.js";
 
-// Same place doc-hierarchy writes its notifications: outside the repo, so logs survive
-// branch switches and aren't caught by .gitignore rules on the project tree.
+// Outside the repo, so logs survive branch switches.
 const LOG_DIR = process.env.MCP_MANAGER_LOG_DIR ?? path.resolve(packageRoot, "..", "..", "logs");
 const LOG_FILE = path.join(LOG_DIR, "mcp-manager.log");
 

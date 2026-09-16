@@ -1,12 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-// src/ -> package root. Independent of whatever cwd the MCP client uses.
-export const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-const docsRoot = path.join(packageRoot, "docs");
+import { workspaceRoot } from "./config.js";
 
 function latestBaselineDir(): { dir: string; number: number } {
+  const docsRoot = workspaceRoot();
   const entries = fs.existsSync(docsRoot) ? fs.readdirSync(docsRoot, { withFileTypes: true }) : [];
   const matches = entries
     .filter(e => e.isDirectory())
@@ -21,23 +18,24 @@ function latestBaselineDir(): { dir: string; number: number } {
   return { dir: path.join(docsRoot, matches[0].name), number: matches[0].number };
 }
 
-/** Highest-numbered docs/baseline-<N> folder. There's no separate "promoted" pointer any
- * more — the highest index is authoritative. See the design note at the top of 004 for
- * what that trades away. */
+/** Highest-numbered baseline-<N> folder in the workspace. There's no separate "promoted"
+ * pointer any more — the highest index is authoritative. See the design note at the top of
+ * 004 for what that trades away. */
 export function getLatestBaselineDir(): string {
   return latestBaselineDir().dir;
 }
 
-/** The one number the whole docs/ layout is derived from. */
+/** The one number the whole workspace layout is derived from. */
 export function latestBaselineNumber(): number {
   return latestBaselineDir().number;
 }
 
 /**
  * The draft in progress. There is no independent draft numbering: the current draft is always
- * the next baseline, so it lives at docs/draft-<latest baseline + 1>.
+ * the next baseline, so it lives at <workspace>/draft-<latest baseline + 1>.
  */
 export function getCurrentDraftDir(): string {
+  const docsRoot = workspaceRoot();
   const next = latestBaselineNumber() + 1;
   const dir = path.join(docsRoot, `draft-${next}`);
   if (!fs.existsSync(dir)) {
@@ -57,15 +55,15 @@ export function draftFilePath(docId: string): string {
 }
 
 /**
- * Resolve a caller-supplied path against the package root, and refuse anything that
- * resolves outside docs/. These paths come from whatever the calling model supplies via
+ * Resolve a caller-supplied path against the workspace root, and refuse anything that
+ * resolves outside it. These paths come from whatever the calling model supplies via
  * an MCP tool call, not just from you.
  */
 export function resolveDocPath(p: string): string {
-  const resolved = path.isAbsolute(p) ? path.resolve(p) : path.resolve(packageRoot, p);
-  const resolvedDocsRoot = path.resolve(docsRoot);
+  const resolvedDocsRoot = path.resolve(workspaceRoot());
+  const resolved = path.isAbsolute(p) ? path.resolve(p) : path.resolve(resolvedDocsRoot, p);
   if (resolved !== resolvedDocsRoot && !resolved.startsWith(resolvedDocsRoot + path.sep)) {
-    throw new Error(`Path escapes docs/: ${p}`);
+    throw new Error(`Path escapes the workspace: ${p}`);
   }
   return resolved;
 }

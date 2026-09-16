@@ -5,9 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import JSZip from "jszip";
 
-// Redirect the signoff store before applyChange.js loads it, so the real logs/ file is untouched.
+// Redirect the signoff store before applyChange.js loads it, so the real log file is untouched.
 const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "signoff-store-"));
-process.env.SIGNOFF_LOG_DIR = storeDir;
+process.env.MCP_CONFIG_LOGSPACE = storeDir;
 
 const { applyChange } = await import("./applyChange.js");
 const { readSignoffState, writeSignoffState } = await import("./signoffStore.js");

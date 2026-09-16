@@ -4,14 +4,21 @@ config({ path: new URL("../../.env", import.meta.url) });
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, extname, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "@huggingface/transformers";
 import { SearchClient, AzureKeyCredential } from "@azure/search-documents";
 import { extractText, getDocumentProxy } from "unpdf";
 
 const INDEX_NAME = "docs-index";
-const DOCS_DIR = fileURLToPath(new URL("../docs", import.meta.url));
+
+// The document folder lives outside the repo; there is deliberately no repo-relative fallback.
+const DOCS_DIR = process.env.MCP_CONFIG_WORKSPACE;
+if (!DOCS_DIR) {
+  throw new Error(
+    'MCP_CONFIG_WORKSPACE is not set — add it to "docs-search"\'s "env" in ' +
+    "mcp-manager/servers.json, or export it directly when running a script by hand."
+  );
+}
 
 const client = new SearchClient(
   process.env.AZURE_SEARCH_ENDPOINT!,

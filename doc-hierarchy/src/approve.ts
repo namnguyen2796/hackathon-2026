@@ -4,8 +4,8 @@ import {
   getCurrentDraftDir,
   latestBaselineNumber,
   listDocxFiles,
-  packageRoot,
 } from "./baselines.js";
+import { workspaceRoot } from "./config.js";
 import { readDocMetadata } from "./metadata.js";
 
 const APPROVED = /^Approved \(Baseline \d+\)$/;
@@ -56,25 +56,26 @@ export async function assertPromotable(draftDir: string): Promise<string[]> {
 }
 
 /**
- * Promote the draft in progress — docs/draft-<latest baseline + 1> — by renaming it to the
- * baseline it was always destined to become, then open the next draft. Renaming rather than
+ * Promote the draft in progress — <workspace>/draft-<latest baseline + 1> — by renaming it to
+ * the baseline it was always destined to become, then open the next draft. Renaming rather than
  * copying means a promoted draft stops existing as a draft. No Status rewriting: an untouched
  * document keeps its existing Approved (Baseline N), and documents signed off this cycle
  * already carry this cycle's number.
  */
 export async function approveBaseline(): Promise<PromotionResult> {
   const baselineNumber = latestBaselineNumber() + 1;
-  const draftDir = getCurrentDraftDir(); // docs/draft-<baselineNumber>
+  const draftDir = getCurrentDraftDir(); // <workspace>/draft-<baselineNumber>
   const files = await assertPromotable(draftDir);
 
+  const docsRoot = workspaceRoot();
   const baselineName = `baseline-${baselineNumber}`;
-  const baselineDir = path.join(packageRoot, "docs", baselineName);
+  const baselineDir = path.join(docsRoot, baselineName);
   fs.renameSync(draftDir, baselineDir);
 
-  // Opened before the reindex: if indexing fails, the docs/ tree is still coherent (a baseline
-  // plus a live draft) and recovers with a plain `npm run doc-hierarchy:ingest`.
+  // Opened before the reindex: if indexing fails, the workspace tree is still coherent (a
+  // baseline plus a live draft) and recovers with a plain `npm run doc-hierarchy:ingest`.
   const draftName = `draft-${baselineNumber + 1}`;
-  const newDraftDir = path.join(packageRoot, "docs", draftName);
+  const newDraftDir = path.join(docsRoot, draftName);
   fs.mkdirSync(newDraftDir, { recursive: true });
   for (const f of fs.readdirSync(baselineDir)) {
     fs.copyFileSync(path.join(baselineDir, f), path.join(newDraftDir, f));

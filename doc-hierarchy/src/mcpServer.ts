@@ -1,3 +1,9 @@
+import { config } from "dotenv";
+// Local-run convenience only: mcp-manager injects these before any module code runs, and
+// dotenv never overrides an already-set variable. quiet, because dotenv logs to stdout and
+// stdout here is the MCP JSON-RPC stream.
+config({ path: new URL("../../.env", import.meta.url), quiet: true });
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import fs from "node:fs";
@@ -5,38 +11,41 @@ import path from "node:path";
 import { z } from "zod";
 import { loadGraph, downstreamOf } from "./graph.js";
 import { detectChange } from "./detectChange.js";
-import { resolveDocPath, getLatestBaselineDir, getCurrentDraftDir, draftFilePath, latestBaselineNumber, packageRoot } from "./baselines.js";
+import { resolveDocPath, getLatestBaselineDir, getCurrentDraftDir, draftFilePath, latestBaselineNumber } from "./baselines.js";
 import { readDocMetadata } from "./metadata.js";
 import { applyChange } from "./applyChange.js";
 import { signoff, signoffStatus } from "./signoff.js";
 import { approveBaseline } from "./approve.js";
+import { logspaceRoot } from "./config.js";
 
 const RAG_API_URL = process.env.RAG_API_URL ?? "http://localhost:8000/search";
 const INDEX = "doc-hierarchy-index";
 
-// Deliberately outside the repo, so notifications survive branch switches and
-// aren't caught by .gitignore rules on the project tree.
-const NOTIFY_DIR = process.env.NOTIFY_LOG_DIR ?? path.join(packageRoot, "..", "..", "logs");
-const NOTIFY_FILE = path.join(NOTIFY_DIR, "doc-hierarchy-notifications.json");
+// Resolved per call, not at module load: an unset MCP_CONFIG_LOGSPACE must fail the one tool
+// that needs it, not abort the whole server before any tool is reachable.
+function notifyFile(): string {
+  return path.join(logspaceRoot(), "doc-hierarchy-notifications.json");
+}
 
 type Notification = { timestamp: string; docId: string; notifierName: string; message: string };
 
 /** Append one entry. Read and write are both sync with no await between them, so
  *  concurrent tool calls cannot interleave and lose each other's writes. */
 function appendNotification(docId: string, notifierName: string, message: string): number {
-  fs.mkdirSync(NOTIFY_DIR, { recursive: true });
+  const file = notifyFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
 
   let entries: Notification[] = [];
-  if (fs.existsSync(NOTIFY_FILE)) {
-    const parsed = JSON.parse(fs.readFileSync(NOTIFY_FILE, "utf-8"));
+  if (fs.existsSync(file)) {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
     if (!Array.isArray(parsed)) {
-      throw new Error(`${NOTIFY_FILE} is not a JSON array; move it aside and retry.`);
+      throw new Error(`${file} is not a JSON array; move it aside and retry.`);
     }
     entries = parsed;
   }
 
   entries.push({ timestamp: new Date().toISOString(), docId, notifierName, message });
-  fs.writeFileSync(NOTIFY_FILE, JSON.stringify(entries, null, 2));
+  fs.writeFileSync(file, JSON.stringify(entries, null, 2));
   return entries.length;
 }
 
@@ -147,7 +156,7 @@ server.registerTool(
   {
     description:
       "Record a notification to a document's owner/reviewer. Appends to " +
-      "logs/doc-hierarchy-notifications.json (stub — wire up email/Teams later).",
+      "doc-hierarchy-notifications.json in the configured logspace (stub — wire up email/Teams later).",
     inputSchema: { docId: z.string(), notifierName: z.string(), message: z.string() },
   },
   async ({ docId, notifierName, message }) => {
@@ -155,7 +164,7 @@ server.registerTool(
       const count = appendNotification(docId, notifierName, message);
       // stderr, not stdout — stdout carries the JSON-RPC stream.
       console.error(`NOTIFY ${docId} by ${notifierName}: ${message}`);
-      return { content: [{ type: "text" as const, text: `Logged to ${NOTIFY_FILE} (${count} total).` }] };
+      return { content: [{ type: "text" as const, text: `Logged to ${notifyFile()} (${count} total).` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
     }

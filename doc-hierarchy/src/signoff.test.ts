@@ -7,7 +7,7 @@ import JSZip from "jszip";
 import { createFixtureDocx, metadataFields } from "./docxFixture.js";
 
 const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "signoff-store-"));
-process.env.SIGNOFF_LOG_DIR = storeDir;
+process.env.MCP_CONFIG_LOGSPACE = storeDir;
 
 const { signoff, signoffStatus } = await import("./signoff.js");
 

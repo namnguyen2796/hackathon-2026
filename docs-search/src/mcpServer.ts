@@ -1,3 +1,9 @@
+import { config } from "dotenv";
+// Local-run convenience only: mcp-manager injects these before any module code runs, and
+// dotenv never overrides an already-set variable. quiet, because dotenv logs to stdout and
+// stdout here is the MCP JSON-RPC stream.
+config({ path: new URL("../../.env", import.meta.url), quiet: true });
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";

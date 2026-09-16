@@ -27,7 +27,7 @@ const MANAGEMENT_TOOLS: Tool[] = [
   {
     name: "restart_mcp_server",
     description:
-      "Kill and relaunch one managed dev server by name (e.g. 'docs-search', 'doc-hierarchy'). Use after code changes, or when a server hangs or crashes.",
+      "Kill and relaunch one managed dev server by name. Use after code changes, or when a server hangs or crashes.",
     inputSchema: {
       type: "object",
       properties: {

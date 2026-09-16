@@ -1,6 +1,8 @@
 import { config } from "dotenv";
 // Resolved against this file, not process.cwd(), so the script runs from any directory.
-config({ path: new URL("../../.env", import.meta.url) });
+// quiet, because approve_baseline imports this module into the running MCP server, where
+// stdout is the JSON-RPC stream and dotenv's banner would corrupt it.
+config({ path: new URL("../../.env", import.meta.url), quiet: true });
 
 import fs from "node:fs";
 import path from "node:path";
@@ -8,7 +10,8 @@ import { pathToFileURL } from "node:url";
 import mammoth from "mammoth";
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 import { SearchClient, AzureKeyCredential } from "@azure/search-documents";
-import { getLatestBaselineDir, listDocxFiles, packageRoot } from "./baselines.js";
+import { getLatestBaselineDir, listDocxFiles } from "./baselines.js";
+import { workspaceRoot } from "./config.js";
 import { parseMetadata } from "./metadata.js";
 
 // Mirrors the doc-hierarchy-index schema in createIndex.ts.
@@ -97,14 +100,15 @@ async function uploadDoc(doc: ParsedDoc): Promise<string[]> {
     id: `${doc.docId}-${i}`,
     docId: doc.docId,
     content: c,
-    source: path.relative(packageRoot, doc.filePath).split(path.sep).join("/"),
+    source: path.relative(workspaceRoot(), doc.filePath).split(path.sep).join("/"),
     owner: doc.owner,
     reviewer: doc.reviewer,
     dependsOn: doc.dependsOn,
     embedding: await embed(c),
   })));
   await client.uploadDocuments(documents);
-  console.log(`Indexed ${documents.length} chunks from ${doc.docId}`);
+  // stderr, not stdout — this runs inside the MCP server when approve_baseline reindexes.
+  console.error(`Indexed ${documents.length} chunks from ${doc.docId}`);
   return documents.map(d => d.id);
 }
 
@@ -131,10 +135,10 @@ export async function reindexLatestBaseline(): Promise<void> {
 
   const stale = previousIds.filter(id => !currentIds.has(id));
   if (stale.length) await client.deleteDocuments("id", stale);
-  console.log(`Removed ${stale.length} stale chunk(s) left over from the previous baseline.`);
+  console.error(`Removed ${stale.length} stale chunk(s) left over from the previous baseline.`);
 
   fs.writeFileSync(path.join(baselineDir, "manifest.json"), JSON.stringify(manifest, null, 2));
-  console.log(`Wrote manifest.json (${manifest.length} docs) to ${baselineDir}`);
+  console.error(`Wrote manifest.json (${manifest.length} docs) to ${baselineDir}`);
 }
 
 // Only when run directly (npm run doc-hierarchy:ingest), not when approve.ts imports it.
