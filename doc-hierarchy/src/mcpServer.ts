@@ -16,10 +16,14 @@ import { readDocMetadata } from "./metadata.js";
 import { applyChange } from "./applyChange.js";
 import { signoff, signoffStatus } from "./signoff.js";
 import { approveBaseline } from "./approve.js";
+import { askDocuments } from "./ask.js";
 import { logspaceRoot } from "./config.js";
 
 const RAG_API_URL = process.env.RAG_API_URL ?? "http://localhost:8000/search";
 const INDEX = "doc-hierarchy-index";
+// Untested placeholder, and scoped to a single docId rather than the open-corpus search in
+// ask.ts — not necessarily comparable to that tool's floors.
+const SUGGEST_MIN_SCORE = 0.5;
 
 // Resolved per call, not at module load: an unset MCP_CONFIG_LOGSPACE must fail the one tool
 // that needs it, not abort the whole server before any tool is reachable.
@@ -142,12 +146,45 @@ server.registerTool(
         filter: `docId eq '${odataEscape(docId)}'`,
       }),
     });
-    const { results } = (await res.json()) as { results: { content: string; source: string }[] };
+    const { results: rawResults } = (await res.json()) as {
+      results: { content: string; source: string; score: number }[];
+    };
+    const results = rawResults.filter((r) => r.score >= SUGGEST_MIN_SCORE);
     const text = results.length
       ? `Related passages in ${docId} that may need review:\n\n` +
         results.map((r) => r.content).join("\n---\n")
       : `No related passages found in ${docId}.`;
     return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+server.registerTool(
+  "ask_documents",
+  {
+    description:
+      "Search the current baseline for passages relevant to a question. Some returned " +
+      "passages may state the answer directly; others may only discuss, reference, or " +
+      "constrain the topic without stating a specific value — read each passage and decide " +
+      "which it is before answering. Passages under 'found via dependency graph' were " +
+      "surfaced because they're downstream of a relevant document, not because their wording " +
+      "resembles the question — they may use entirely different vocabulary.",
+    inputSchema: { question: z.string() },
+  },
+  async ({ question }) => {
+    try {
+      const { found, viaGraph } = await askDocuments(question);
+      if (found.length === 0) {
+        return { content: [{ type: "text" as const, text: "No relevant documents found." }] };
+      }
+      const foundText = found.map((h) => `[${h.docId}] ${h.content}`).join("\n---\n");
+      const graphText = viaGraph.length
+        ? "\n\nFound via dependency graph (downstream of a relevant document, wording may differ entirely):\n" +
+          viaGraph.map((h) => `[${h.docId}, downstream of ${h.downstreamOf}] ${h.content}`).join("\n---\n")
+        : "";
+      return { content: [{ type: "text" as const, text: foundText + graphText }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
+    }
   }
 );
 
