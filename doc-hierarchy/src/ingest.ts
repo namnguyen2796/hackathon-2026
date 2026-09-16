@@ -4,10 +4,11 @@ config({ path: new URL("../../.env", import.meta.url) });
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import mammoth from "mammoth";
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 import { SearchClient, AzureKeyCredential } from "@azure/search-documents";
-import { getLatestBaselineDir, packageRoot } from "./baselines.js";
+import { getLatestBaselineDir, listDocxFiles, packageRoot } from "./baselines.js";
 import { parseMetadata } from "./metadata.js";
 
 // Mirrors the doc-hierarchy-index schema in createIndex.ts.
@@ -75,25 +76,22 @@ function assertNoCycle(manifest: { docId: string; dependsOn: string[] }[]) {
   for (const { docId } of manifest) visit(docId, []);
 }
 
-// Wipes every document currently in the index — not the Azure Search index resource itself,
-// just its contents. Since the index only ever represents one baseline at a time, this is
-// sufficient to guarantee no stale entry from a previous run (or a previous ID scheme) survives.
-async function wipeIndex() {
-  let ids: string[];
+// The ids currently in the index. Captured before uploading so stale leftovers can be removed
+// *after* the new baseline has landed, rather than emptying the index first.
+async function indexedIds(): Promise<string[]> {
   try {
     const all = await client.search("*", { select: ["id"] });
-    ids = [];
+    const ids: string[] = [];
     for await (const r of all.results) ids.push(r.document.id);
+    return ids;
   } catch (err) {
     throw new Error(
       `Could not read doc-hierarchy-index — has createIndex.ts been run yet? (${(err as Error).message})`
     );
   }
-  if (ids.length) await client.deleteDocuments("id", ids);
-  console.log(`Wiped ${ids.length} existing chunk(s) from the index before reindexing.`);
 }
 
-async function uploadDoc(doc: ParsedDoc) {
+async function uploadDoc(doc: ParsedDoc): Promise<string[]> {
   const chunks = chunk(doc.text);
   const documents = await Promise.all(chunks.map(async (c, i) => ({
     id: `${doc.docId}-${i}`,
@@ -107,19 +105,39 @@ async function uploadDoc(doc: ParsedDoc) {
   })));
   await client.uploadDocuments(documents);
   console.log(`Indexed ${documents.length} chunks from ${doc.docId}`);
+  return documents.map(d => d.id);
 }
 
-const baselineDir = getLatestBaselineDir();
-const files = fs.readdirSync(baselineDir).filter(f => f.endsWith(".docx"));
+/** Drop every chunk currently indexed and repopulate from whichever baseline folder is
+ *  now the highest-numbered one. Also called by approve_baseline, right after promotion. */
+export async function reindexLatestBaseline(): Promise<void> {
+  const baselineDir = getLatestBaselineDir();
+  const files = listDocxFiles(baselineDir);
 
-// Parse and validate every document before touching the index — a malformed doc found
-// partway through must not leave the index wiped but only half-repopulated.
-const parsed = await Promise.all(files.map(f => parseFile(path.join(baselineDir, f))));
-const manifest = parsed.map(d => ({ docId: d.docId, dependsOn: d.dependsOn }));
-assertNoCycle(manifest);
+  // Parse and validate every document before touching the index — a malformed doc found
+  // partway through must not leave the index wiped but only half-repopulated.
+  const parsed = await Promise.all(files.map(f => parseFile(path.join(baselineDir, f))));
+  const manifest = parsed.map(d => ({ docId: d.docId, dependsOn: d.dependsOn }));
+  assertNoCycle(manifest);
 
-await wipeIndex();
-for (const doc of parsed) await uploadDoc(doc);
+  // Chunk ids are stable (`<docId>-<n>`), so uploads overwrite the previous baseline's chunks
+  // in place. Only leftovers the new baseline doesn't cover are deleted, and only once every
+  // upload has succeeded — the index is never empty mid-run.
+  const previousIds = await indexedIds();
+  const currentIds = new Set<string>();
+  for (const doc of parsed) {
+    for (const id of await uploadDoc(doc)) currentIds.add(id);
+  }
 
-fs.writeFileSync(path.join(baselineDir, "manifest.json"), JSON.stringify(manifest, null, 2));
-console.log(`Wrote manifest.json (${manifest.length} docs) to ${baselineDir}`);
+  const stale = previousIds.filter(id => !currentIds.has(id));
+  if (stale.length) await client.deleteDocuments("id", stale);
+  console.log(`Removed ${stale.length} stale chunk(s) left over from the previous baseline.`);
+
+  fs.writeFileSync(path.join(baselineDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+  console.log(`Wrote manifest.json (${manifest.length} docs) to ${baselineDir}`);
+}
+
+// Only when run directly (npm run doc-hierarchy:ingest), not when approve.ts imports it.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await reindexLatestBaseline();
+}

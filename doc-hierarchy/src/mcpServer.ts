@@ -5,9 +5,11 @@ import path from "node:path";
 import { z } from "zod";
 import { loadGraph, downstreamOf } from "./graph.js";
 import { detectChange } from "./detectChange.js";
-import { resolveDocPath, getLatestBaselineDir, getLatestDraftDir, draftFilePath, packageRoot } from "./baselines.js";
+import { resolveDocPath, getLatestBaselineDir, getCurrentDraftDir, draftFilePath, latestBaselineNumber, packageRoot } from "./baselines.js";
 import { readDocMetadata } from "./metadata.js";
 import { applyChange } from "./applyChange.js";
+import { signoff, signoffStatus } from "./signoff.js";
+import { approveBaseline } from "./approve.js";
 
 const RAG_API_URL = process.env.RAG_API_URL ?? "http://localhost:8000/search";
 const INDEX = "doc-hierarchy-index";
@@ -56,7 +58,7 @@ server.registerTool(
   async ({ draftDir }) => {
     try {
       const baselineDir = getLatestBaselineDir();
-      const resolvedDraftDir = draftDir ? resolveDocPath(draftDir) : getLatestDraftDir();
+      const resolvedDraftDir = draftDir ? resolveDocPath(draftDir) : getCurrentDraftDir();
 
       const lines = (await loadGraph()).map(({ docId }) => {
         // Documents are stored as <docId>.docx; a mismatch shows up as "missing".
@@ -94,7 +96,7 @@ server.registerTool(
       : path.join(getLatestBaselineDir(), `${docId}.docx`);
     const resolvedDraftPath = draftPath
       ? resolveDocPath(draftPath)
-      : path.join(getLatestDraftDir(), `${docId}.docx`);
+      : path.join(getCurrentDraftDir(), `${docId}.docx`);
     const summary = await detectChange(resolvedBaselinePath, resolvedDraftPath);
     return { content: [{ type: "text" as const, text: summary ?? "No changes detected." }] };
   }
@@ -173,10 +175,86 @@ server.registerTool(
     try {
       const filePath = draftFilePath(docId);
       const { owner } = await readDocMetadata(filePath);
-      const latestBaseline = path.basename(getLatestBaselineDir());
-      const { statusChanged } = await applyChange(filePath, oldText, newText, owner, latestBaseline);
-      const note = statusChanged ? " Proposed tracked changes set Status to Draft and Signoff Date to TBD." : "";
+      const draftName = path.basename(getCurrentDraftDir());
+      const { statusChanged } = await applyChange(filePath, oldText, newText, { author: owner, docId, draftName });
+      const note = statusChanged ? " Its prior approval was cleared: Status is now Draft and Signoff Date TBD." : "";
       return { content: [{ type: "text" as const, text: `Proposed change to ${docId}, tracked as an edit by ${owner}.${note}` }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
+  "signoff",
+  {
+    description:
+      "Record an approval for a document in the current draft, from the person named. The role " +
+      "(owner or reviewer) is inferred by matching the name against the document's own metadata; " +
+      "both roles must approve before it becomes Approved. Documents unchanged from the baseline " +
+      "need no signoff. Requires all tracked changes to already be accepted or rejected in Word.",
+    inputSchema: { docId: z.string(), name: z.string() },
+  },
+  async ({ docId, name }) => {
+    try {
+      const draftDir = getCurrentDraftDir();
+      const baselineDir = getLatestBaselineDir();
+      const result = await signoff({
+        draftPath: draftFilePath(docId),
+        baselinePath: path.join(baselineDir, `${docId}.docx`),
+        docId,
+        draftName: path.basename(draftDir),
+        name,
+        nextBaselineNumber: latestBaselineNumber() + 1,
+      });
+      const text = result.outcome === "unchanged"
+        ? `${docId} is unchanged from ${path.basename(baselineDir)} — its existing approval (${result.status}) still stands, so no signoff is needed.`
+        : result.bothApproved
+          ? `Recorded ${result.role} approval for ${docId} by ${name}. Both approvals are now in — Status: ${result.status}.`
+          : `Recorded ${result.role} approval for ${docId} by ${name}. Status: ${result.status}, awaiting the other role.`;
+      return { content: [{ type: "text" as const, text }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
+  "signoff_status",
+  {
+    description: "Check which approvals (owner/reviewer) have been recorded for a document in the current draft.",
+    inputSchema: { docId: z.string() },
+  },
+  async ({ docId }) => {
+    try {
+      const state = signoffStatus(path.basename(getCurrentDraftDir()), docId);
+      const text = [
+        `Owner: ${state.owner ? `approved by ${state.owner.name} at ${state.owner.at}` : "pending"}`,
+        `Reviewer: ${state.reviewer ? `approved by ${state.reviewer.name} at ${state.reviewer.at}` : "pending"}`,
+      ].join("\n");
+      return { content: [{ type: "text" as const, text }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
+  "approve_baseline",
+  {
+    description:
+      "Promote the draft in progress to the next baseline: draft-N is renamed to baseline-N and " +
+      "draft-N+1 is opened as a copy of it. Requires a manifest.json listing documents that are " +
+      "all present and Approved. Reindexes against the new baseline.",
+    inputSchema: { name: z.string() },
+  },
+  async ({ name }) => {
+    try {
+      const result = await approveBaseline();
+      // Audit trail only — nothing here verifies the caller is entitled to promote.
+      console.error(`PROMOTED by ${name}: ${result.baselineName} (${result.docCount} docs)`);
+      return { content: [{ type: "text" as const, text:
+        `Promoted to ${result.baselineName} (${result.docCount} documents), reindexed, and opened ${result.draftName} as the next cycle.` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
     }

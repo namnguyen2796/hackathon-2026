@@ -4,9 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import JSZip from "jszip";
-import { applyChange } from "./applyChange.js";
+
+// Redirect the signoff store before applyChange.js loads it, so the real logs/ file is untouched.
+const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "signoff-store-"));
+process.env.SIGNOFF_LOG_DIR = storeDir;
+
+const { applyChange } = await import("./applyChange.js");
+const { readSignoffState, writeSignoffState } = await import("./signoffStore.js");
 
 const W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const DRAFT = "draft-test";
+const DOC_ID = "DOC-1";
 
 async function createDocument(filePath: string, status: string, signoffDate = "2026-09-15"): Promise<void> {
   const zip = new JSZip();
@@ -31,60 +39,89 @@ async function readDocumentXml(filePath: string): Promise<string> {
   return zip.file("word/document.xml")!.async("string");
 }
 
-test("tracks Draft and TBD proposals for approval metadata from the latest baseline", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "apply-change-"));
-  const filePath = path.join(tempDir, "matching.docx");
+async function readMetadataTable(filePath: string): Promise<string> {
+  return (await readDocumentXml(filePath)).match(/<w:tbl>.*?<\/w:tbl>/s)![0];
+}
 
+async function withDocument(status: string, body: (filePath: string) => Promise<void>): Promise<void> {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "apply-change-"));
   try {
-    await createDocument(filePath, "Approved (Baseline 1)");
-    const result = await applyChange(filePath, "Original", "Proposal", "Owner", "baseline-1");
-    const xml = await readDocumentXml(filePath);
+    const filePath = path.join(tempDir, "doc.docx");
+    await createDocument(filePath, status);
+    await body(filePath);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+const edit = (filePath: string, oldText: string, newText: string) =>
+  applyChange(filePath, oldText, newText, { author: "Owner", docId: DOC_ID, draftName: DRAFT });
+
+test.after(() => fs.rmSync(storeDir, { recursive: true, force: true }));
+
+test("reverts an approval matching the latest baseline to Draft", async () => {
+  await withDocument("Approved (Baseline 2)", async filePath => {
+    const result = await edit(filePath, "Original", "Proposal");
+    const table = await readMetadataTable(filePath);
 
     assert.deepEqual(result, { statusChanged: true });
-    assert.match(xml, /<w:del [^>]*w:author="Owner"[^>]*><w:r><w:delText xml:space="preserve">Approved \(Baseline 1\)<\/w:delText><\/w:r><\/w:del>/);
-    assert.match(xml, /<w:ins [^>]*w:author="Owner"[^>]*><w:r><w:t xml:space="preserve">Draft<\/w:t><\/w:r><\/w:ins>/);
-    assert.match(xml, /<w:del [^>]*w:author="Owner"[^>]*><w:r><w:delText xml:space="preserve">2026-09-15<\/w:delText><\/w:r><\/w:del>/);
-    assert.match(xml, /<w:ins [^>]*w:author="Owner"[^>]*><w:r><w:t xml:space="preserve">TBD<\/w:t><\/w:r><\/w:ins>/);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+    assert.match(table, /<w:t xml:space="preserve">Draft<\/w:t>/);
+    assert.match(table, /<w:t xml:space="preserve">TBD<\/w:t>/);
+    // The metadata revert is a plain edit — only the paragraph proposal is tracked.
+    assert.doesNotMatch(table, /<w:(ins|del)[ >]/);
+  });
 });
 
-test("leaves approval for an older baseline unchanged", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "apply-change-"));
-  const filePath = path.join(tempDir, "stale.docx");
+test("reverts an approval naming an older baseline too", async () => {
+  await withDocument("Approved (Baseline 1)", async filePath => {
+    const result = await edit(filePath, "Original", "Proposal");
+    const table = await readMetadataTable(filePath);
 
-  try {
-    await createDocument(filePath, "Approved (Baseline 1)");
-    const result = await applyChange(filePath, "Original", "Proposal", "Owner", "baseline-2");
+    assert.deepEqual(result, { statusChanged: true });
+    assert.doesNotMatch(table, /Approved \(Baseline 1\)/);
+    assert.match(table, /<w:t xml:space="preserve">Draft<\/w:t>/);
+  });
+});
+
+test("reverts a partially approved document", async () => {
+  await withDocument("Partially Approved", async filePath => {
+    const result = await edit(filePath, "Original", "Proposal");
+
+    assert.deepEqual(result, { statusChanged: true });
+    assert.match(await readMetadataTable(filePath), /<w:t xml:space="preserve">Draft<\/w:t>/);
+  });
+});
+
+test("leaves an already-Draft document's metadata untouched", async () => {
+  await withDocument("Draft", async filePath => {
+    const result = await edit(filePath, "Original", "Proposal");
+    const table = await readMetadataTable(filePath);
+
+    assert.deepEqual(result, { statusChanged: false });
+    assert.match(table, /<w:t>Draft<\/w:t>/);
+    assert.match(table, /<w:t>2026-09-15<\/w:t>/);
+  });
+});
+
+test("does not revert twice when revising a pending proposal", async () => {
+  await withDocument("Approved (Baseline 2)", async filePath => {
+    await edit(filePath, "Original", "Proposal");
+    const result = await edit(filePath, "Original", "Revised proposal");
     const xml = await readDocumentXml(filePath);
 
     assert.deepEqual(result, { statusChanged: false });
-    assert.match(xml, /<w:t>Approved \(Baseline 1\)<\/w:t>/);
-    assert.match(xml, /<w:t>2026-09-15<\/w:t>/);
-    assert.doesNotMatch(xml, /<w:t xml:space="preserve">(?:Draft|TBD)<\/w:t>/);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("does not change Draft again when revising a pending proposal", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "apply-change-"));
-  const filePath = path.join(tempDir, "idempotent.docx");
-
-  try {
-    await createDocument(filePath, "Approved (Baseline 1)");
-    await applyChange(filePath, "Original", "Proposal", "Owner", "baseline-1");
-    const result = await applyChange(filePath, "Original", "Revised proposal", "Owner", "baseline-1");
-    const xml = await readDocumentXml(filePath);
-
-    assert.deepEqual(result, { statusChanged: false });
-    assert.match(xml, /<w:t xml:space="preserve">Draft<\/w:t>/);
-    assert.match(xml, /<w:t xml:space="preserve">TBD<\/w:t>/);
-    assert.equal((xml.match(/<w:delText xml:space="preserve">Approved \(Baseline 1\)<\/w:delText>/g) ?? []).length, 1);
-    assert.equal((xml.match(/<w:delText xml:space="preserve">2026-09-15<\/w:delText>/g) ?? []).length, 1);
+    assert.equal((xml.match(/<w:t xml:space="preserve">Draft<\/w:t>/g) ?? []).length, 1);
+    assert.equal((xml.match(/<w:t xml:space="preserve">TBD<\/w:t>/g) ?? []).length, 1);
     assert.match(xml, /Revised proposal/);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+  });
+});
+
+test("clears the recorded signoff when it reverts an approval", async () => {
+  await withDocument("Approved (Baseline 2)", async filePath => {
+    writeSignoffState(DRAFT, DOC_ID, { owner: { name: "Owner", at: "2026-09-15T00:00:00.000Z" } });
+
+    await edit(filePath, "Original", "Proposal");
+
+    assert.deepEqual(readSignoffState(DRAFT, DOC_ID), {});
+  });
 });

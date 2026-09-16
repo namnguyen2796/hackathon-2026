@@ -6,37 +6,54 @@ import { fileURLToPath } from "node:url";
 export const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const docsRoot = path.join(packageRoot, "docs");
 
-function latestNumberedDir(kind: "baseline" | "draft"): string {
-  const pattern = new RegExp(`^${kind}-(\\d+)$`);
+function latestBaselineDir(): { dir: string; number: number } {
   const entries = fs.existsSync(docsRoot) ? fs.readdirSync(docsRoot, { withFileTypes: true }) : [];
   const matches = entries
     .filter(e => e.isDirectory())
-    .map(e => ({ name: e.name, match: e.name.match(pattern) }))
+    .map(e => ({ name: e.name, match: e.name.match(/^baseline-(\d+)$/) }))
     .filter((e): e is { name: string; match: RegExpMatchArray } => e.match !== null)
-    .map(e => ({ name: e.name, index: Number(e.match[1]) }));
+    .map(e => ({ name: e.name, number: Number(e.match[1]) }));
 
   if (matches.length === 0) {
-    throw new Error(`No ${kind}-<N> folders found under ${docsRoot}`);
+    throw new Error(`No baseline-<N> folders found under ${docsRoot}`);
   }
-  matches.sort((a, b) => b.index - a.index);
-  return path.join(docsRoot, matches[0].name);
+  matches.sort((a, b) => b.number - a.number);
+  return { dir: path.join(docsRoot, matches[0].name), number: matches[0].number };
 }
 
 /** Highest-numbered docs/baseline-<N> folder. There's no separate "promoted" pointer any
  * more — the highest index is authoritative. See the design note at the top of 004 for
  * what that trades away. */
 export function getLatestBaselineDir(): string {
-  return latestNumberedDir("baseline");
+  return latestBaselineDir().dir;
 }
 
-/** Highest-numbered docs/draft-<N> folder — the default candidate to diff against. */
-export function getLatestDraftDir(): string {
-  return latestNumberedDir("draft");
+/** The one number the whole docs/ layout is derived from. */
+export function latestBaselineNumber(): number {
+  return latestBaselineDir().number;
 }
 
-/** The only path apply_change is allowed to write to. Baselines stay frozen. */
+/**
+ * The draft in progress. There is no independent draft numbering: the current draft is always
+ * the next baseline, so it lives at docs/draft-<latest baseline + 1>.
+ */
+export function getCurrentDraftDir(): string {
+  const next = latestBaselineNumber() + 1;
+  const dir = path.join(docsRoot, `draft-${next}`);
+  if (!fs.existsSync(dir)) {
+    throw new Error(`Expected draft-${next} under ${docsRoot} — the draft for baseline-${next} — but it isn't there.`);
+  }
+  return dir;
+}
+
+/** Word leaves ~$-prefixed owner files next to open documents; they are not documents. */
+export function listDocxFiles(dir: string): string[] {
+  return fs.readdirSync(dir).filter(f => f.endsWith(".docx") && !f.startsWith("~$"));
+}
+
+/** The only path apply_change and signoff are allowed to write to. Baselines stay frozen. */
 export function draftFilePath(docId: string): string {
-  return path.join(getLatestDraftDir(), `${docId}.docx`);
+  return path.join(getCurrentDraftDir(), `${docId}.docx`);
 }
 
 /**
