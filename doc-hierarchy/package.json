@@ -7,6 +7,7 @@
     "create-index": "tsx src/createIndex.ts",
     "migrate-alias": "tsx src/migrateToAlias.ts",
     "ingest": "tsx src/ingest.ts",
+    "ingest-draft": "tsx src/ingestDraft.ts",
     "mcp": "tsx src/mcpServer.ts",
     "test": "tsx --test src/*.test.ts"
   },

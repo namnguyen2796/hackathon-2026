@@ -89,5 +89,10 @@ export async function approveBaseline(): Promise<PromotionResult> {
   const manifest = "manifest.json";
   fs.copyFileSync(path.join(baselineDir, manifest), path.join(newDraftDir, manifest));
 
+  // After the reindex, not before: the draft index is seeded by copying from whichever index
+  // the alias points at, and that only holds this baseline once the swap has happened.
+  const { seedDraftIndexFromBaseline } = await import("./draftIndex.js");
+  await seedDraftIndexFromBaseline(files.map(f => path.basename(f, ".docx")));
+
   return { baselineName, draftName, docCount: files.length };
 }

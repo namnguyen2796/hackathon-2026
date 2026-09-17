@@ -4,6 +4,7 @@ config({ path: new URL("../../.env", import.meta.url), quiet: true });
 import { ALIAS, PHYSICAL_INDEXES, indexClient } from "./indexAlias.js";
 import { ensureIndex } from "./createIndex.js";
 import { seedIndex } from "./ingest.js";
+import { applyServerEnvDefaults } from "./serverEnv.js";
 
 const [BLUE, GREEN] = PHYSICAL_INDEXES;
 
@@ -55,4 +56,5 @@ async function migrate(): Promise<void> {
   console.log(`Alias "${ALIAS}" -> ${BLUE}. Alias changes can take a few seconds to propagate.`);
 }
 
+applyServerEnvDefaults();
 await migrate();

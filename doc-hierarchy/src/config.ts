@@ -2,8 +2,9 @@ function required(name: string): string {
   const value = process.env[name];
   if (!value) {
     throw new Error(
-      `${name} is not set — add it to "doc-hierarchy"'s "env" in mcp-manager/servers.json, ` +
-      "or export it directly when running a script or test by hand."
+      `${name} is not set. Scripts read it from the "doc-hierarchy" entry in servers.json ` +
+      "(found via MCP_MANAGER_CONFIG, ../servers.json, or mcp-manager/servers.json) — check " +
+      `it defines ${name} there, or export it directly when running a script or test by hand.`
     );
   }
   return value;

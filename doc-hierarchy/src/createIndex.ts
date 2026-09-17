@@ -7,6 +7,11 @@ import { pathToFileURL } from "node:url";
 import { SearchIndex } from "@azure/search-documents";
 import { indexClient, PHYSICAL_INDEXES } from "./indexAlias.js";
 
+/** Draft content, kept out of the baseline indexes entirely: sharing one index between a
+ *  baseline and its draft under the same docId is what made documents overwrite each other.
+ *  Declared here rather than in draftIndex.ts so this module can create it without a cycle. */
+export const DRAFT_INDEX = "doc-hierarchy-draft-index";
+
 /** One definition shared by both physical indexes behind the alias. */
 export const HIERARCHY_INDEX_SCHEMA: Omit<SearchIndex, "name"> = {
   fields: [
@@ -49,6 +54,7 @@ export async function recreateIndex(name: string): Promise<void> {
 
 // Only when run directly (npm run doc-hierarchy:create-index).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  for (const name of PHYSICAL_INDEXES) await ensureIndex(name);
-  console.log(`${PHYSICAL_INDEXES.join(" and ")} ready.`);
+  const names = [...PHYSICAL_INDEXES, DRAFT_INDEX];
+  for (const name of names) await ensureIndex(name);
+  console.log(`${names.join(", ")} ready.`);
 }

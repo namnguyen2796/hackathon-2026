@@ -17,6 +17,7 @@
     "doc-hierarchy:create-index": "npm run create-index -w doc-hierarchy",
     "doc-hierarchy:migrate-alias": "npm run migrate-alias -w doc-hierarchy",
     "doc-hierarchy:ingest": "npm run ingest -w doc-hierarchy",
+    "doc-hierarchy:ingest-draft": "npm run ingest-draft -w doc-hierarchy",
     "mcp-manager": "npm run mcp -w mcp-manager"
   },
   "devDependencies": {

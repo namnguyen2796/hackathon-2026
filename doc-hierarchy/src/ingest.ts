@@ -16,9 +16,10 @@ import { parseMetadata } from "./metadata.js";
 import { contentHash } from "./contentHash.js";
 import { recreateIndex } from "./createIndex.js";
 import { ALIAS, getLiveAndStagingIndexNames, swapAliasToStaging } from "./indexAlias.js";
+import { processInBatches } from "./concurrency.js";
 
 // Mirrors HIERARCHY_INDEX_SCHEMA in createIndex.ts.
-type HierarchyDoc = {
+export type HierarchyDoc = {
   id: string;
   docId: string;
   content: string;
@@ -45,7 +46,7 @@ type ManifestEntry = { docId: string; dependsOn: string[]; contentHash: string }
 const PARSE_BATCH_SIZE = 10;
 
 const clients = new Map<string, SearchClient<HierarchyDoc>>();
-function clientFor(indexName: string): SearchClient<HierarchyDoc> {
+export function clientFor(indexName: string): SearchClient<HierarchyDoc> {
   let client = clients.get(indexName);
   if (!client) {
     client = new SearchClient<HierarchyDoc>(
@@ -57,16 +58,8 @@ function clientFor(indexName: string): SearchClient<HierarchyDoc> {
   return client;
 }
 
-function odataEscape(s: string): string {
+export function odataEscape(s: string): string {
   return s.replace(/'/g, "''");
-}
-
-async function processInBatches<T>(
-  items: T[], batchSize: number, fn: (item: T) => Promise<void>
-): Promise<void> {
-  for (let i = 0; i < items.length; i += batchSize) {
-    await Promise.all(items.slice(i, i + batchSize).map(fn));
-  }
 }
 
 let extractorPromise: Promise<FeatureExtractionPipeline> | undefined;
@@ -104,23 +97,23 @@ function chunk(text: string, maxChars = 1200): string[] {
   return chunks.filter(Boolean);
 }
 
-async function parseFile(filePath: string): Promise<ParsedDoc> {
+export async function parseFile(filePath: string): Promise<ParsedDoc> {
   const { value: html } = await mammoth.convertToHtml({ path: filePath });
   const { value: text } = await mammoth.extractRawText({ path: filePath });
   const meta = parseMetadata(html);
   return { filePath, text, ...meta };
 }
 
-function sourcePath(filePath: string): string {
+export function sourcePath(filePath: string): string {
   return path.relative(workspaceRoot(), filePath).split(path.sep).join("/");
 }
 
 /** Parsed in a stable order regardless of which file finishes first within a batch. */
-async function parseBaseline(baselineDir: string): Promise<ParsedDoc[]> {
-  const files = listDocxFiles(baselineDir);
+export async function parseDocsIn(dir: string): Promise<ParsedDoc[]> {
+  const files = listDocxFiles(dir);
   const parsed = new Array<ParsedDoc>(files.length);
   await processInBatches(files.map((file, i) => ({ file, i })), PARSE_BATCH_SIZE, async ({ file, i }) => {
-    parsed[i] = await parseFile(path.join(baselineDir, file));
+    parsed[i] = await parseFile(path.join(dir, file));
   });
   return parsed;
 }
@@ -135,17 +128,21 @@ function writeManifest(baselineDir: string, manifest: ManifestEntry[]): void {
 }
 
 /**
- * Hashes the previous baseline recorded for each document. A missing manifest, or a manifest
- * predating contentHash, means every document is treated as changed — over-embedding once is
- * the safe direction to fail.
+ * docId -> contentHash, from a manifest written by a previous reindex. A missing file, or
+ * entries predating contentHash, simply yield no entry — callers read that as "changed", which
+ * over-embeds rather than skipping something that actually moved.
  */
+export function readManifestHashes(manifestPath: string): Map<string, string> {
+  if (!fs.existsSync(manifestPath)) return new Map();
+  const entries = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as { docId: string; contentHash?: string }[];
+  return new Map(entries.filter(e => e.contentHash).map(e => [e.docId, e.contentHash!]));
+}
+
+/** The baseline before this one — what a reindex of `baselineDir` compares against. */
 function readPreviousHashes(baselineDir: string): Map<string, string> {
   const number = Number(path.basename(baselineDir).match(/-(\d+)$/)?.[1]);
   if (!Number.isFinite(number)) return new Map();
-  const previous = path.join(workspaceRoot(), `baseline-${number - 1}`, "manifest.json");
-  if (!fs.existsSync(previous)) return new Map();
-  const entries = JSON.parse(fs.readFileSync(previous, "utf-8")) as { docId: string; contentHash?: string }[];
-  return new Map(entries.filter(e => e.contentHash).map(e => [e.docId, e.contentHash!]));
+  return readManifestHashes(path.join(workspaceRoot(), `baseline-${number - 1}`, "manifest.json"));
 }
 
 function assertNoCycle(manifest: { docId: string; dependsOn: string[] }[]) {
@@ -165,7 +162,9 @@ function assertNoCycle(manifest: { docId: string; dependsOn: string[] }[]) {
   for (const { docId } of manifest) visit(docId, []);
 }
 
-async function uploadDoc(doc: ParsedDoc, indexName: string): Promise<void> {
+/** Returns the chunk ids written, so a caller replacing a document can delete whatever the
+ *  previous version left behind that this one didn't overwrite. */
+export async function uploadDoc(doc: ParsedDoc, indexName: string): Promise<string[]> {
   const chunks = chunk(doc.text);
   const documents = await Promise.all(chunks.map(async (c, i) => ({
     id: `${doc.docId}-${i}`,
@@ -180,6 +179,7 @@ async function uploadDoc(doc: ParsedDoc, indexName: string): Promise<void> {
   await clientFor(indexName).uploadDocuments(documents);
   // stderr, not stdout — this runs inside the MCP server when approve_baseline reindexes.
   console.error(`Embedded ${documents.length} chunk(s) from ${doc.docId} into ${indexName}`);
+  return documents.map(d => d.id);
 }
 
 /**
@@ -220,7 +220,7 @@ export async function reindexLatestBaseline(): Promise<void> {
 
   // Parse and validate every document before touching any index — a malformed doc found
   // partway through must not leave a half-populated staging index ready to be swapped in.
-  const parsed = await parseBaseline(baselineDir);
+  const parsed = await parseDocsIn(baselineDir);
   const manifest = buildManifest(parsed);
   assertNoCycle(manifest);
 
@@ -252,7 +252,7 @@ export async function reindexLatestBaseline(): Promise<void> {
  *  one-time alias migration to seed the first live index, before any alias exists to read. */
 export async function seedIndex(indexName: string): Promise<void> {
   const baselineDir = getLatestBaselineDir();
-  const parsed = await parseBaseline(baselineDir);
+  const parsed = await parseDocsIn(baselineDir);
   const manifest = buildManifest(parsed);
   assertNoCycle(manifest);
 
@@ -263,5 +263,7 @@ export async function seedIndex(indexName: string): Promise<void> {
 
 // Only when run directly (npm run doc-hierarchy:ingest), not when approve.ts imports it.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const { applyServerEnvDefaults } = await import("./serverEnv.js");
+  applyServerEnvDefaults();
   await reindexLatestBaseline();
 }

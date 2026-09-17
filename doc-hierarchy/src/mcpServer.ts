@@ -17,6 +17,7 @@ import { applyChange } from "./applyChange.js";
 import { signoff, signoffStatus } from "./signoff.js";
 import { approveBaseline } from "./approve.js";
 import { askDocuments } from "./ask.js";
+import { processInBatches } from "./concurrency.js";
 import { logspaceRoot } from "./config.js";
 
 const RAG_API_URL = process.env.RAG_API_URL ?? "http://localhost:8000/search";
@@ -24,6 +25,8 @@ const INDEX = "doc-hierarchy-index";
 // Untested placeholder, and scoped to a single docId rather than the open-corpus search in
 // ask.ts — not necessarily comparable to that tool's floors.
 const SUGGEST_MIN_SCORE = 0.5;
+// Arbitrary starting point, not tuned against real file I/O.
+const COMPARE_BATCH_SIZE = 10;
 
 // Resolved per call, not at module load: an unset MCP_CONFIG_LOGSPACE must fail the one tool
 // that needs it, not abort the whole server before any tool is reachable.
@@ -57,6 +60,23 @@ function odataEscape(s: string): string {
   return s.replace(/'/g, "''");
 }
 
+async function readOrNull(file: string): Promise<Buffer | null> {
+  try {
+    return await fs.promises.readFile(file);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+/** No sync I/O: this runs once per document and would otherwise block the whole server — which
+ *  is the single-threaded JSON-RPC loop — for the length of the entire comparison pass. */
+async function compareToBaseline(baselineFile: string, draftFile: string): Promise<string> {
+  const [baseline, draft] = await Promise.all([readOrNull(baselineFile), readOrNull(draftFile)]);
+  if (!baseline || !draft) return "missing";
+  return baseline.equals(draft) ? "same   " : "CHANGED";
+}
+
 const server = new McpServer({ name: "doc-hierarchy", version: "1.0.0" });
 
 server.registerTool(
@@ -73,15 +93,22 @@ server.registerTool(
       const baselineDir = getLatestBaselineDir();
       const resolvedDraftDir = draftDir ? resolveDocPath(draftDir) : getCurrentDraftDir();
 
-      const lines = (await loadGraph()).map(({ docId }) => {
-        // Documents are stored as <docId>.docx; a mismatch shows up as "missing".
-        const b = path.join(baselineDir, `${docId}.docx`);
-        const d = path.join(resolvedDraftDir, `${docId}.docx`);
-        const state = !fs.existsSync(b) || !fs.existsSync(d)
-          ? "missing"
-          : fs.readFileSync(b).equals(fs.readFileSync(d)) ? "same   " : "CHANGED";
-        return `  ${docId.padEnd(13)} ${state}`;
-      });
+      // Written into a pre-sized array by index, not pushed from inside the concurrent
+      // callbacks — otherwise whichever comparison finished first would set the output order.
+      const graph = await loadGraph();
+      const lines = new Array<string>(graph.length);
+      await processInBatches(
+        graph.map(({ docId }, i) => ({ docId, i })),
+        COMPARE_BATCH_SIZE,
+        async ({ docId, i }) => {
+          // Documents are stored as <docId>.docx; a mismatch shows up as "missing".
+          const state = await compareToBaseline(
+            path.join(baselineDir, `${docId}.docx`),
+            path.join(resolvedDraftDir, `${docId}.docx`)
+          );
+          lines[i] = `  ${docId.padEnd(13)} ${state}`;
+        }
+      );
 
       return { content: [{ type: "text" as const, text:
         `Current baseline: ${path.basename(baselineDir)}\nDraft: ${path.basename(resolvedDraftDir)}\n\n${lines.join("\n")}` }] };
@@ -223,6 +250,10 @@ server.registerTool(
       const { owner } = await readDocMetadata(filePath);
       const draftName = path.basename(getCurrentDraftDir());
       const { statusChanged } = await applyChange(filePath, oldText, newText, { author: owner, docId, draftName });
+      // Lazily imported for the same reason approve.ts does it: draftIndex.ts pulls in ingest.ts,
+      // and with it the embedding model, which server startup shouldn't pay for.
+      const { updateDraftIndexForDoc } = await import("./draftIndex.js");
+      await updateDraftIndexForDoc(docId, filePath);
       const note = statusChanged ? " Its prior approval was cleared: Status is now Draft and Signoff Date TBD." : "";
       return { content: [{ type: "text" as const, text: `Proposed change to ${docId}, tracked as an edit by ${owner}.${note}` }] };
     } catch (e) {
