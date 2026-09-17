@@ -13,8 +13,11 @@ import { SearchClient, AzureKeyCredential } from "@azure/search-documents";
 import { getLatestBaselineDir, listDocxFiles } from "./baselines.js";
 import { workspaceRoot } from "./config.js";
 import { parseMetadata } from "./metadata.js";
+import { contentHash } from "./contentHash.js";
+import { recreateIndex } from "./createIndex.js";
+import { ALIAS, getLiveAndStagingIndexNames, swapAliasToStaging } from "./indexAlias.js";
 
-// Mirrors the doc-hierarchy-index schema in createIndex.ts.
+// Mirrors HIERARCHY_INDEX_SCHEMA in createIndex.ts.
 type HierarchyDoc = {
   id: string;
   docId: string;
@@ -35,10 +38,36 @@ type ParsedDoc = {
   dependsOn: string[];
 };
 
-const client = new SearchClient<HierarchyDoc>(
-  process.env.AZURE_SEARCH_ENDPOINT!, "doc-hierarchy-index",
-  new AzureKeyCredential(process.env.AZURE_SEARCH_KEY!)
-);
+type ManifestEntry = { docId: string; dependsOn: string[]; contentHash: string };
+
+// How many .docx files are parsed at once. Unbounded Promise.all over the whole corpus is
+// what this is guarding against, not throughput.
+const PARSE_BATCH_SIZE = 10;
+
+const clients = new Map<string, SearchClient<HierarchyDoc>>();
+function clientFor(indexName: string): SearchClient<HierarchyDoc> {
+  let client = clients.get(indexName);
+  if (!client) {
+    client = new SearchClient<HierarchyDoc>(
+      process.env.AZURE_SEARCH_ENDPOINT!, indexName,
+      new AzureKeyCredential(process.env.AZURE_SEARCH_KEY!)
+    );
+    clients.set(indexName, client);
+  }
+  return client;
+}
+
+function odataEscape(s: string): string {
+  return s.replace(/'/g, "''");
+}
+
+async function processInBatches<T>(
+  items: T[], batchSize: number, fn: (item: T) => Promise<void>
+): Promise<void> {
+  for (let i = 0; i < items.length; i += batchSize) {
+    await Promise.all(items.slice(i, i + batchSize).map(fn));
+  }
+}
 
 let extractorPromise: Promise<FeatureExtractionPipeline> | undefined;
 async function embed(text: string): Promise<number[]> {
@@ -49,10 +78,30 @@ async function embed(text: string): Promise<number[]> {
   return Array.from((await extractor(text, { pooling: "mean", normalize: true })).data as Float32Array);
 }
 
-function chunk(text: string, size = 1000): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
-  return out;
+// Splits on paragraph breaks, and hard-splits any single paragraph already over the cap.
+// Ported from docs-search's ingest.ts — the fixed-width split this replaces was only ever
+// tolerable while documents were about one chunk each.
+function chunk(text: string, maxChars = 1200): string[] {
+  const chunks: string[] = [];
+  let current = "";
+  for (const paragraph of text.split("\n\n")) {
+    if (paragraph.length > maxChars) {
+      if (current.trim()) chunks.push(current.trim());
+      current = "";
+      for (let i = 0; i < paragraph.length; i += maxChars) {
+        chunks.push(paragraph.slice(i, i + maxChars).trim());
+      }
+      continue;
+    }
+    if (current.length + paragraph.length < maxChars) {
+      current += paragraph + "\n\n";
+    } else {
+      if (current.trim()) chunks.push(current.trim());
+      current = paragraph + "\n\n";
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.filter(Boolean);
 }
 
 async function parseFile(filePath: string): Promise<ParsedDoc> {
@@ -60,6 +109,43 @@ async function parseFile(filePath: string): Promise<ParsedDoc> {
   const { value: text } = await mammoth.extractRawText({ path: filePath });
   const meta = parseMetadata(html);
   return { filePath, text, ...meta };
+}
+
+function sourcePath(filePath: string): string {
+  return path.relative(workspaceRoot(), filePath).split(path.sep).join("/");
+}
+
+/** Parsed in a stable order regardless of which file finishes first within a batch. */
+async function parseBaseline(baselineDir: string): Promise<ParsedDoc[]> {
+  const files = listDocxFiles(baselineDir);
+  const parsed = new Array<ParsedDoc>(files.length);
+  await processInBatches(files.map((file, i) => ({ file, i })), PARSE_BATCH_SIZE, async ({ file, i }) => {
+    parsed[i] = await parseFile(path.join(baselineDir, file));
+  });
+  return parsed;
+}
+
+function buildManifest(parsed: ParsedDoc[]): ManifestEntry[] {
+  return parsed.map(d => ({ docId: d.docId, dependsOn: d.dependsOn, contentHash: contentHash(d.text) }));
+}
+
+function writeManifest(baselineDir: string, manifest: ManifestEntry[]): void {
+  fs.writeFileSync(path.join(baselineDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+  console.error(`Wrote manifest.json (${manifest.length} docs) to ${baselineDir}`);
+}
+
+/**
+ * Hashes the previous baseline recorded for each document. A missing manifest, or a manifest
+ * predating contentHash, means every document is treated as changed — over-embedding once is
+ * the safe direction to fail.
+ */
+function readPreviousHashes(baselineDir: string): Map<string, string> {
+  const number = Number(path.basename(baselineDir).match(/-(\d+)$/)?.[1]);
+  if (!Number.isFinite(number)) return new Map();
+  const previous = path.join(workspaceRoot(), `baseline-${number - 1}`, "manifest.json");
+  if (!fs.existsSync(previous)) return new Map();
+  const entries = JSON.parse(fs.readFileSync(previous, "utf-8")) as { docId: string; contentHash?: string }[];
+  return new Map(entries.filter(e => e.contentHash).map(e => [e.docId, e.contentHash!]));
 }
 
 function assertNoCycle(manifest: { docId: string; dependsOn: string[] }[]) {
@@ -79,66 +165,100 @@ function assertNoCycle(manifest: { docId: string; dependsOn: string[] }[]) {
   for (const { docId } of manifest) visit(docId, []);
 }
 
-// The ids currently in the index. Captured before uploading so stale leftovers can be removed
-// *after* the new baseline has landed, rather than emptying the index first.
-async function indexedIds(): Promise<string[]> {
-  try {
-    const all = await client.search("*", { select: ["id"] });
-    const ids: string[] = [];
-    for await (const r of all.results) ids.push(r.document.id);
-    return ids;
-  } catch (err) {
-    throw new Error(
-      `Could not read doc-hierarchy-index — has createIndex.ts been run yet? (${(err as Error).message})`
-    );
-  }
-}
-
-async function uploadDoc(doc: ParsedDoc): Promise<string[]> {
+async function uploadDoc(doc: ParsedDoc, indexName: string): Promise<void> {
   const chunks = chunk(doc.text);
   const documents = await Promise.all(chunks.map(async (c, i) => ({
     id: `${doc.docId}-${i}`,
     docId: doc.docId,
     content: c,
-    source: path.relative(workspaceRoot(), doc.filePath).split(path.sep).join("/"),
+    source: sourcePath(doc.filePath),
     owner: doc.owner,
     reviewer: doc.reviewer,
     dependsOn: doc.dependsOn,
     embedding: await embed(c),
   })));
-  await client.uploadDocuments(documents);
+  await clientFor(indexName).uploadDocuments(documents);
   // stderr, not stdout — this runs inside the MCP server when approve_baseline reindexes.
-  console.error(`Indexed ${documents.length} chunks from ${doc.docId}`);
-  return documents.map(d => d.id);
+  console.error(`Embedded ${documents.length} chunk(s) from ${doc.docId} into ${indexName}`);
 }
 
-/** Drop every chunk currently indexed and repopulate from whichever baseline folder is
- *  now the highest-numbered one. Also called by approve_baseline, right after promotion. */
+/**
+ * Reuse a document's already-embedded chunks rather than re-embedding them. The metadata
+ * fields are refreshed from the current parse even so: `source` names the baseline folder,
+ * which changes on every promotion even when the document's content doesn't.
+ * False if the live index has nothing for this document, so the caller can embed it instead.
+ */
+async function copyExistingChunks(doc: ParsedDoc, live: string, staging: string): Promise<boolean> {
+  const results = await clientFor(live).search("*", { filter: `docId eq '${odataEscape(doc.docId)}'` });
+  const documents: HierarchyDoc[] = [];
+  for await (const r of results.results) {
+    documents.push({
+      ...r.document,
+      source: sourcePath(doc.filePath),
+      owner: doc.owner,
+      reviewer: doc.reviewer,
+      dependsOn: doc.dependsOn,
+    });
+  }
+  if (!documents.length) return false;
+  await clientFor(staging).uploadDocuments(documents);
+  console.error(`Copied ${documents.length} unchanged chunk(s) for ${doc.docId} from ${live}`);
+  return true;
+}
+
+/**
+ * Rebuild the staging index from whichever baseline folder is now the highest-numbered one,
+ * then point the alias at it. Also called by approve_baseline, right after promotion.
+ *
+ * Documents whose content hash matches the previous baseline's manifest have their existing
+ * chunks copied across instead of re-embedded. That means a copied document keeps whatever
+ * chunking scheme it was originally embedded under — changing `chunk()` requires one
+ * deliberate full re-embed (delete the previous baseline's manifest.json) to take effect.
+ */
 export async function reindexLatestBaseline(): Promise<void> {
   const baselineDir = getLatestBaselineDir();
-  const files = listDocxFiles(baselineDir);
 
-  // Parse and validate every document before touching the index — a malformed doc found
-  // partway through must not leave the index wiped but only half-repopulated.
-  const parsed = await Promise.all(files.map(f => parseFile(path.join(baselineDir, f))));
-  const manifest = parsed.map(d => ({ docId: d.docId, dependsOn: d.dependsOn }));
+  // Parse and validate every document before touching any index — a malformed doc found
+  // partway through must not leave a half-populated staging index ready to be swapped in.
+  const parsed = await parseBaseline(baselineDir);
+  const manifest = buildManifest(parsed);
   assertNoCycle(manifest);
 
-  // Chunk ids are stable (`<docId>-<n>`), so uploads overwrite the previous baseline's chunks
-  // in place. Only leftovers the new baseline doesn't cover are deleted, and only once every
-  // upload has succeeded — the index is never empty mid-run.
-  const previousIds = await indexedIds();
-  const currentIds = new Set<string>();
+  const { live, staging } = await getLiveAndStagingIndexNames();
+  await recreateIndex(staging);
+
+  const previousHashes = readPreviousHashes(baselineDir);
+  const hashes = new Map(manifest.map(m => [m.docId, m.contentHash]));
+
+  let copied = 0;
   for (const doc of parsed) {
-    for (const id of await uploadDoc(doc)) currentIds.add(id);
+    const unchanged = previousHashes.get(doc.docId) === hashes.get(doc.docId);
+    if (unchanged && await copyExistingChunks(doc, live, staging)) copied++;
+    else await uploadDoc(doc, staging);
   }
 
-  const stale = previousIds.filter(id => !currentIds.has(id));
-  if (stale.length) await client.deleteDocuments("id", stale);
-  console.error(`Removed ${stale.length} stale chunk(s) left over from the previous baseline.`);
+  // Nothing has been served from staging until this line. The alias — and so every caller —
+  // moves from the whole old baseline to the whole new one in one step.
+  await swapAliasToStaging(staging);
+  console.error(
+    `Reindexed ${parsed.length} doc(s) into ${staging} ` +
+    `(${copied} copied unchanged, ${parsed.length - copied} re-embedded). ${ALIAS} -> ${staging}.`
+  );
 
-  fs.writeFileSync(path.join(baselineDir, "manifest.json"), JSON.stringify(manifest, null, 2));
-  console.error(`Wrote manifest.json (${manifest.length} docs) to ${baselineDir}`);
+  writeManifest(baselineDir, manifest);
+}
+
+/** Unconditional full embed of the latest baseline into one named physical index. Used by the
+ *  one-time alias migration to seed the first live index, before any alias exists to read. */
+export async function seedIndex(indexName: string): Promise<void> {
+  const baselineDir = getLatestBaselineDir();
+  const parsed = await parseBaseline(baselineDir);
+  const manifest = buildManifest(parsed);
+  assertNoCycle(manifest);
+
+  await recreateIndex(indexName);
+  for (const doc of parsed) await uploadDoc(doc, indexName);
+  writeManifest(baselineDir, manifest);
 }
 
 // Only when run directly (npm run doc-hierarchy:ingest), not when approve.ts imports it.

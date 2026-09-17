@@ -50,9 +50,13 @@ export function hasPendingRevisions(doc: Document): boolean {
   return (select("//w:ins | //w:del", doc) as Node[]).length > 0;
 }
 
-/** Find a metadata-table row by its label cell (e.g. "Status"), returning its value cell. */
+/** Find a metadata-table row by its label cell (e.g. "Status"), returning its value cell.
+ *  Scoped to the first table: by convention that is the metadata table, and any later table
+ *  in the body could otherwise contribute a row with a colliding label. */
 export function findTableRow(doc: Document, label: string): Node | undefined {
-  for (const row of select("//w:tbl/w:tr", doc) as Node[]) {
+  const metadataTable = (select("//w:tbl", doc) as Node[])[0];
+  if (!metadataTable) return undefined;
+  for (const row of select("./w:tr", metadataTable) as Node[]) {
     const cells = select("./w:tc", row) as Node[];
     if (cells.length < 2) continue;
     if (joinText(select(".//w:t", cells[0]) as Node[]).trim() === label) return cells[1];

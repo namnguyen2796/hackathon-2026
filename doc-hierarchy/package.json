@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "create-index": "tsx src/createIndex.ts",
+    "migrate-alias": "tsx src/migrateToAlias.ts",
     "ingest": "tsx src/ingest.ts",
     "mcp": "tsx src/mcpServer.ts",
     "test": "tsx --test src/*.test.ts"
