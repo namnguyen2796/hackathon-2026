@@ -1,7 +1,7 @@
 import { loadGraph, downstreamOf } from "./graph.js";
+import { indexFor, type DocScope } from "./indexNames.js";
 
 const RAG_API_URL = process.env.RAG_API_URL ?? "http://localhost:8000/search";
-const INDEX = "doc-hierarchy-index";
 
 // Untested placeholders — calibrate against real data. One floor for the plain search: a passage
 // that states the value and one that discusses the topic without stating it can score similarly,
@@ -37,11 +37,11 @@ function searchInFilter(field: string, values: string[]): string {
   return `search.in(${field}, '${list}', '${ID_SEPARATOR}')`;
 }
 
-async function search(query: string, top_k: number, filter?: string): Promise<Hit[]> {
+async function search(index: string, query: string, top_k: number, filter?: string): Promise<Hit[]> {
   const res = await fetch(RAG_API_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ index: INDEX, query, top_k, filter }),
+    body: JSON.stringify({ index, query, top_k, filter }),
   });
   const { results } = (await res.json()) as { results: Hit[] };
   return results;
@@ -52,10 +52,13 @@ export type AskResult = {
   viaGraph: (Hit & { downstreamOf: string })[]; // surfaced only via dependency, checked independently
 };
 
-export async function askDocuments(query: string): Promise<AskResult> {
-  const raw = await search(query, 8);
+export async function askDocuments(query: string, scope: DocScope = "baseline"): Promise<AskResult> {
+  const index = indexFor(scope);
+  const raw = await search(index, query, 8);
   const found = raw.filter((h) => h.score >= SEARCH_MIN_SCORE);
 
+  // The baseline's manifest either way: a draft's own manifest is only regenerated at
+  // promotion, so mid-cycle it is a copy of this one rather than a separate graph.
   const graph = await loadGraph();
   const foundIds = new Set(found.map((h) => h.docId));
   // Every candidate recorded once, attributed to the first hit that reached it — the same doc
@@ -73,6 +76,7 @@ export async function askDocuments(query: string): Promise<AskResult> {
   if (candidates.length === 0) return { found, viaGraph: [] };
 
   const hits = await search(
+    index,
     query,
     candidates.length * CHUNKS_PER_GRAPH_CANDIDATE,
     searchInFilter("docId", candidates.map((c) => c.docId))

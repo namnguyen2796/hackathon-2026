@@ -1,10 +1,7 @@
 import { SearchIndexClient, AzureKeyCredential } from "@azure/search-documents";
+import { ALIAS, PHYSICAL_INDEXES } from "./indexNames.js";
 
-/** What every caller (rag-api, suggest_changes, ask_documents) references. It is an alias, not
- *  a physical index — reindexing alternates between the two physical names below and flips the
- *  alias only once the new content is fully uploaded. */
-export const ALIAS = "doc-hierarchy-index";
-export const PHYSICAL_INDEXES = ["doc-hierarchy-index-blue", "doc-hierarchy-index-green"] as const;
+export { ALIAS, PHYSICAL_INDEXES };
 
 let cached: SearchIndexClient | undefined;
 

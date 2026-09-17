@@ -6,11 +6,9 @@ config({ path: new URL("../../.env", import.meta.url), quiet: true });
 import { pathToFileURL } from "node:url";
 import { SearchIndex } from "@azure/search-documents";
 import { indexClient, PHYSICAL_INDEXES } from "./indexAlias.js";
+import { DRAFT_INDEX } from "./indexNames.js";
 
-/** Draft content, kept out of the baseline indexes entirely: sharing one index between a
- *  baseline and its draft under the same docId is what made documents overwrite each other.
- *  Declared here rather than in draftIndex.ts so this module can create it without a cycle. */
-export const DRAFT_INDEX = "doc-hierarchy-draft-index";
+export { DRAFT_INDEX };
 
 /** One definition shared by both physical indexes behind the alias. */
 export const HIERARCHY_INDEX_SCHEMA: Omit<SearchIndex, "name"> = {

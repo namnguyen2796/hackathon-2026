@@ -18,15 +18,25 @@ import { signoff, signoffStatus } from "./signoff.js";
 import { approveBaseline } from "./approve.js";
 import { askDocuments } from "./ask.js";
 import { processInBatches } from "./concurrency.js";
+import { indexFor } from "./indexNames.js";
 import { logspaceRoot } from "./config.js";
 
 const RAG_API_URL = process.env.RAG_API_URL ?? "http://localhost:8000/search";
-const INDEX = "doc-hierarchy-index";
 // Untested placeholder, and scoped to a single docId rather than the open-corpus search in
 // ask.ts — not necessarily comparable to that tool's floors.
 const SUGGEST_MIN_SCORE = 0.5;
 // Arbitrary starting point, not tuned against real file I/O.
 const COMPARE_BATCH_SIZE = 10;
+
+// Shared by both semantic tools: the calling model picks which corpus a question is about,
+// rather than this server guessing from the wording.
+const SCOPE_ARG = z.enum(["baseline", "draft"]).optional();
+const SCOPE_NOTE =
+  "Set scope to 'draft' to read the work in progress instead of the approved baseline — use " +
+  "that for questions about what a proposed change says or what a document currently reads " +
+  "like before approval. Draft passages can include the text of pending tracked changes, and " +
+  "may lag edits made directly in Word or a recent signoff until the draft index is rebuilt. " +
+  "Defaults to 'baseline', the approved content.";
 
 // Resolved per call, not at module load: an unset MCP_CONFIG_LOGSPACE must fail the one tool
 // that needs it, not abort the whole server before any tool is reachable.
@@ -123,7 +133,10 @@ server.registerTool(
   {
     description:
       "Diff a document's baseline copy against its draft copy. Give baselinePath/draftPath to " +
-      "override; otherwise resolves docId against the latest baseline and latest draft folders.",
+      "override; otherwise resolves docId against the latest baseline and latest draft folders. " +
+      "This is the correct tool for any question about what changed, what was edited, or what a " +
+      "draft altered — it returns the exact added and removed lines. Do not use ask_documents " +
+      "for that: it ranks passages by resemblance to a question and cannot report changes.",
     inputSchema: {
       docId: z.string(),
       baselinePath: z.string().optional(),
@@ -159,15 +172,19 @@ server.registerTool(
 server.registerTool(
   "suggest_changes",
   {
-    description: "Suggest what might need updating in a downstream doc given an upstream change summary.",
-    inputSchema: { docId: z.string(), changeSummary: z.string() },
+    description:
+      "Suggest what might need updating in one downstream doc, given a summary of an upstream " +
+      "change. Always scoped to the single docId given — use ask_documents to search across every " +
+      "document instead. " +
+      SCOPE_NOTE,
+    inputSchema: { docId: z.string(), changeSummary: z.string(), scope: SCOPE_ARG },
   },
-  async ({ docId, changeSummary }) => {
+  async ({ docId, changeSummary, scope }) => {
     const res = await fetch(RAG_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        index: INDEX,
+        index: indexFor(scope),
         query: changeSummary,
         top_k: 5,
         filter: `docId eq '${odataEscape(docId)}'`,
@@ -189,26 +206,44 @@ server.registerTool(
   "ask_documents",
   {
     description:
-      "Search the current baseline for passages relevant to a question. Some returned " +
+      "Search document content — the approved baseline by default — for passages relevant to a " +
+      "question. Some returned " +
       "passages may state the answer directly; others may only discuss, reference, or " +
       "constrain the topic without stating a specific value — read each passage and decide " +
       "which it is before answering. Passages under 'found via dependency graph' were " +
       "surfaced because they're downstream of a relevant document, not because their wording " +
-      "resembles the question — they may use entirely different vocabulary.",
-    inputSchema: { question: z.string() },
+      "resembles the question — they may use entirely different vocabulary. " +
+      SCOPE_NOTE +
+      " This is semantic search over content, not a comparison: it cannot tell you what changed " +
+      "between the baseline and the draft, and asking it to will return loosely related passages " +
+      "rather than an answer. For that, use list_documents to see which documents differ, then " +
+      "detect_change for how a given one differs.",
+    inputSchema: { question: z.string(), scope: SCOPE_ARG },
   },
-  async ({ question }) => {
+  async ({ question, scope }) => {
     try {
-      const { found, viaGraph } = await askDocuments(question);
+      // Named so a misrouted "what changed?" question is answerable from the result itself,
+      // rather than relying on the tool description alone to have steered the caller right.
+      const source = scope === "draft"
+        ? `${path.basename(getCurrentDraftDir())} (work in progress)`
+        : `${path.basename(getLatestBaselineDir())} (approved baseline)`;
+
+      const { found, viaGraph } = await askDocuments(question, scope ?? "baseline");
       if (found.length === 0) {
-        return { content: [{ type: "text" as const, text: "No relevant documents found." }] };
+        return { content: [{ type: "text" as const, text:
+          `No passages in ${source} resemble that question. If you were asking what changed ` +
+          `between the baseline and the draft, this is the wrong tool — use list_documents, ` +
+          `then detect_change on a specific document.` }] };
       }
+      const header =
+        `Passages from ${source}, ranked by resemblance to the question. This is not a diff: ` +
+        `it cannot tell you what changed — use detect_change for that.\n\n`;
       const foundText = found.map((h) => `[${h.docId}] ${h.content}`).join("\n---\n");
       const graphText = viaGraph.length
         ? "\n\nFound via dependency graph (downstream of a relevant document, wording may differ entirely):\n" +
           viaGraph.map((h) => `[${h.docId}, downstream of ${h.downstreamOf}] ${h.content}`).join("\n---\n")
         : "";
-      return { content: [{ type: "text" as const, text: foundText + graphText }] };
+      return { content: [{ type: "text" as const, text: header + foundText + graphText }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
     }
